@@ -1,0 +1,4 @@
+# Draft War Room — dev/CI deps (see Draft_War_Room_SPEC.md §6, §7)
+pytest
+httpx                    # backs fastapi.testclient.TestClient
+ruff

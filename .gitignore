@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+
+# Secrets — ESPN_S2/SWID are live session credentials (SPEC §2.3), never commit
+.env
+.env.*
+!.env.example
+
+# Node / Next.js (frontend lands here later)
+node_modules/
+.next/
+out/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
