@@ -32,7 +32,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, Index, UniqueConstraint, func, text
+from sqlalchemy import UUID, Enum, ForeignKey, Index, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -47,6 +47,16 @@ def enum_column(enum_cls: type[enum.Enum], name: str):
     """Helper to enforce explicit lowercased enum names and labels in PostgreSQL DDL."""
     return mapped_column(
         Enum(enum_cls, name=name, values_callable=lambda e: [x.value for x in e]), nullable=False
+    )
+
+
+def uuid_pk():
+
+    return mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
     )
 
 
@@ -83,7 +93,7 @@ class User(Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (Index("ix_users_email_lower", text("lower(email)"), unique=True),)
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     email: Mapped[str] = mapped_column(nullable=False)
     password_hash: Mapped[str] = mapped_column(nullable=False)
 
@@ -103,7 +113,7 @@ class League(Base, TimestampMixin):
     __tablename__ = "leagues"
     __table_args__ = (UniqueConstraint("user_id", "espn_league_id", "season"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -140,7 +150,7 @@ class Player(Base, TimestampMixin):
         Index("ix_players_season", "season"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     espn_player_id: Mapped[int] = mapped_column(nullable=False)
     season: Mapped[int] = mapped_column(nullable=False)
 
@@ -164,7 +174,7 @@ class Valuation(Base, TimestampMixin):
     __tablename__ = "valuations"
     __table_args__ = (UniqueConstraint("league_id", "player_id"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     league_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("leagues.id", ondelete="CASCADE"), nullable=False
     )
@@ -189,7 +199,7 @@ class Board(Base, TimestampMixin):
 
     __tablename__ = "boards"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -220,7 +230,7 @@ class Board(Base, TimestampMixin):
 class Tier(Base):
     __tablename__ = "tiers"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     board_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
     )
@@ -244,7 +254,7 @@ class Ranking(Base, TimestampMixin):
         Index("ix_rankings_board_id_user_rank", "board_id", "user_rank"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     board_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
     )
@@ -276,7 +286,7 @@ class Ranking(Base, TimestampMixin):
 class MockDraft(Base, TimestampMixin):
     __tablename__ = "mock_drafts"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     board_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
     )
@@ -295,7 +305,7 @@ class MockDraft(Base, TimestampMixin):
 class MockPick(Base):
     __tablename__ = "mock_picks"
     __table_args__ = (UniqueConstraint("mock_draft_id", "pick_number"),)
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     mock_draft_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("mock_drafts.id", ondelete="CASCADE"), nullable=False
     )
@@ -317,7 +327,7 @@ class MockPick(Base):
 class BoardShare(Base, TimestampMixin):
     __tablename__ = "board_shares"
     __table_args__ = (UniqueConstraint("board_id", "shared_with_user_id"),)
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = uuid_pk()
     board_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
     )

@@ -13,17 +13,27 @@ Nothing here connects to Postgres; it reads Base.metadata after import. That
 does mean importing warroom.models needs DATABASE_URL and JWT_SECRET set, which
 CI supplies in its env block and local dev gets from .env.
 """
+
 import uuid
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 import warroom.models as m
 from warroom.db import Base
 
 ALL_TABLES = (
-    "users", "leagues", "players", "valuations", "boards",
-    "tiers", "rankings", "mock_drafts", "mock_picks", "board_shares",
+    "users",
+    "leagues",
+    "players",
+    "valuations",
+    "boards",
+    "tiers",
+    "rankings",
+    "mock_drafts",
+    "mock_picks",
+    "board_shares",
 )
 
 
@@ -102,10 +112,16 @@ class TestForeignKeyBehaviour:
     @pytest.mark.parametrize(
         ("table_name", "column"),
         [
-            ("leagues", "user_id"), ("boards", "user_id"), ("boards", "league_id"),
-            ("tiers", "board_id"), ("rankings", "board_id"), ("mock_drafts", "board_id"),
-            ("mock_picks", "mock_draft_id"), ("board_shares", "board_id"),
-            ("board_shares", "shared_with_user_id"), ("valuations", "league_id"),
+            ("leagues", "user_id"),
+            ("boards", "user_id"),
+            ("boards", "league_id"),
+            ("tiers", "board_id"),
+            ("rankings", "board_id"),
+            ("mock_drafts", "board_id"),
+            ("mock_picks", "mock_draft_id"),
+            ("board_shares", "board_id"),
+            ("board_shares", "shared_with_user_id"),
+            ("valuations", "league_id"),
         ],
     )
     def test_owned_rows_cascade(self, table_name, column):
@@ -155,9 +171,12 @@ class TestNullability:
     @pytest.mark.parametrize(
         ("table_name", "column"),
         [
-            ("users", "email"), ("users", "password_hash"),
-            ("leagues", "point_weights"), ("leagues", "roster_slots"),
-            ("players", "projections"), ("valuations", "value"),
+            ("users", "email"),
+            ("users", "password_hash"),
+            ("leagues", "point_weights"),
+            ("leagues", "roster_slots"),
+            ("players", "projections"),
+            ("valuations", "value"),
             ("board_shares", "permission"),
         ],
     )
@@ -191,14 +210,17 @@ class TestPrimaryKeys:
         assert pk[0].type.python_type is uuid.UUID
         # Without a default the first INSERT fails on NOT NULL.
         assert pk[0].default is not None
+        assert pk[0].server_default is not None
 
 
 class TestJsonbColumns:
     @pytest.mark.parametrize(
         ("table_name", "column"),
         [
-            ("leagues", "roster_slots"), ("leagues", "point_weights"),
-            ("players", "positions"), ("players", "projections"),
+            ("leagues", "roster_slots"),
+            ("leagues", "point_weights"),
+            ("players", "positions"),
+            ("players", "projections"),
         ],
     )
     def test_column_is_jsonb_not_json(self, table_name, column):
@@ -206,3 +228,17 @@ class TestJsonbColumns:
         # or compared for equality. SPEC 1 makes JSONB the reason Postgres is
         # mandatory rather than merely preferred.
         assert isinstance(table(table_name).c[column].type, JSONB)
+
+
+class TestTimestamps:
+    def test_every_datetime_column_is_timezone_aware(self):
+        # TIMESTAMP WITHOUT TIME ZONE plus now() (which returns timestamptz)
+        # makes Postgres silently cast to server-local time. The fix lives in
+        # db.py's type_annotation_map, not on the column — so name the columns.
+        naive = [
+            (t.name, col.name)
+            for t in Base.metadata.tables.values()
+            for col in t.columns
+            if isinstance(col.type, sa.DateTime) and not col.type.timezone
+        ]
+        assert not naive, f"naive datetime columns: {naive}"

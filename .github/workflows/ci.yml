@@ -36,7 +36,13 @@ jobs:
 
       - run: ruff check .
 
-      # Enable once the first Alembic migration exists (SPEC §8, days 1-7).
-      # - run: alembic upgrade head
+      - run: ruff format --check .
+
+      - run: alembic upgrade head
+
+      - name: migrations are reversible
+        run: |
+          alembic downgrade -1
+          alembic upgrade head
 
       - run: pytest -v

@@ -2,11 +2,15 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
 
+import warroom.models  # noqa: F401 — registers tables on Base.metadat
 from alembic import context
+from warroom.config import get_settings
+from warroom.db import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -24,12 +28,14 @@ if config.config_file_name is not None:
 # Importing the models package is not optional: without it Base.metadata is
 # empty and `alembic revision --autogenerate` cheerfully emits an empty
 # migration. Until then autogenerate has nothing to compare against.
-target_metadata = None
+target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
+
+config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 
 def run_migrations_offline() -> None:
