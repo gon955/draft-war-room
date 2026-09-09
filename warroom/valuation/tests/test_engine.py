@@ -3,12 +3,15 @@
 Every expected number here is computed by hand in the comments, so a failure
 points at a real logic change, not a mystery. No DB, no network.
 """
+from typing import ClassVar
+
 import pytest
 
 from warroom.valuation.data_source import FakePlayerDataSource
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 from warroom.valuation.engine import (
     compute_replacement_levels,
+    default_slot_eligibility,
     project_points,
     value_over_replacement,
 )
@@ -162,3 +165,88 @@ class TestFakeDataSource:
         assert ranked[0].player.espn_player_id == 4
         # returns a copy, not the internal list
         assert players is not src._players
+
+
+# --------------------------------------------------------------------------- #
+# Combo slots. ESPN roster slots like SG/SF, G/F, PF/C and F/C mean EITHER side.
+# Matched literally they select nobody, so the slot quietly creates no starter
+# demand and every replacement level is drawn from too shallow a pool.
+# --------------------------------------------------------------------------- #
+class TestComboSlotEligibility:
+    def test_combo_of_two_positions_accepts_either_side(self):
+        assert default_slot_eligibility("PF/C", ("PF",))
+        assert default_slot_eligibility("PF/C", ("C",))
+        assert not default_slot_eligibility("PF/C", ("PG",))
+
+    def test_combo_of_flex_letters_expands_each_side(self):
+        # G/F is guard OR forward, so the G and F rules apply per part.
+        assert default_slot_eligibility("G/F", ("PG",))
+        assert default_slot_eligibility("G/F", ("SG",))
+        assert default_slot_eligibility("G/F", ("SF",))
+        assert default_slot_eligibility("G/F", ("PF",))
+        assert not default_slot_eligibility("G/F", ("C",))
+
+    def test_combo_slot_is_not_a_literal_position(self):
+        # The bug this guards: "SG/SF" is never an element of `positions`.
+        assert default_slot_eligibility("SG/SF", ("SG",))
+        assert default_slot_eligibility("SG/SF", ("SF",))
+        assert not default_slot_eligibility("SG/SF", ("C",))
+
+    def test_plain_slots_are_unchanged(self):
+        assert default_slot_eligibility("PG", ("PG",))
+        assert default_slot_eligibility("G", ("SG",))
+        assert not default_slot_eligibility("G", ("C",))
+        assert default_slot_eligibility("F", ("PF",))
+        assert default_slot_eligibility("UTIL", ("C",))
+        assert not default_slot_eligibility("C", ("PG",))
+
+    def test_combo_slot_creates_starter_demand(self):
+        # num_teams=1, slots PF/C:1, weight pts:1
+        #   PF/C pool sorted: p1(PF)=30, p2(C)=20 -> last starter = 1st = 30
+        # Before the fix the pool was empty and replacement fell back to 0.0.
+        settings = LeagueSettings(
+            scoring_format="points", num_teams=1,
+            roster_slots={"PF/C": 1}, point_weights={"pts": 1.0},
+        )
+        players = [P(1, ["PF"], 30), P(2, ["C"], 20), P(3, ["PG"], 10)]
+        points = {p.espn_player_id: p.stats["pts"] for p in players}
+        repl = compute_replacement_levels(players, settings, points)
+        assert repl["PF/C"] == 30.0
+
+
+class TestRealLeagueRoster:
+    """Regression guard for the live league: 10 teams, 8 starters, 3 combo slots.
+
+    Slot labels and counts read from ESPN's rosterSettings.lineupSlotCounts,
+    so "UT" is ESPN's own label - not the "UTIL" spelling used elsewhere.
+
+    Every configured starting slot must find eligible players; a slot that
+    matches nobody is the signature of an unhandled slot label.
+    """
+    SLOTS: ClassVar[dict[str, int]] = {
+        "PG": 1, "G": 1, "SG/SF": 1, "G/F": 1, "PF/C": 2, "UT": 2,
+    }
+
+    def test_every_starting_slot_has_eligible_players(self):
+        squad = [
+            P(1, ["PG"], 40), P(2, ["SG"], 35), P(3, ["SF"], 30),
+            P(4, ["PF"], 25), P(5, ["C"], 20),
+        ]
+        for slot in self.SLOTS:
+            assert any(default_slot_eligibility(slot, p.positions) for p in squad), (
+                f"no player eligible for {slot!r} - unhandled slot label"
+            )
+
+    def test_replacement_reflects_all_eight_starters(self):
+        settings = LeagueSettings(
+            scoring_format="points", num_teams=10,
+            roster_slots=self.SLOTS, point_weights={"pts": 1.0},
+        )
+        pool = [P(i, ["PG", "SG", "SF", "PF", "C"], 100 - i) for i in range(100)]
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        repl = compute_replacement_levels(pool, settings, points)
+        # Every slot is populated, none silently defaulted to 0.0.
+        assert set(repl) == set(self.SLOTS)
+        assert all(v > 0 for v in repl.values())
+        # PF/C:2 over 10 teams -> 20 starters -> the 20th best (index 19).
+        assert repl["PF/C"] == points[19]

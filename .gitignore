@@ -20,3 +20,8 @@ out/
 .vscode/
 .idea/
 .DS_Store
+
+# one-off ESPN exploration scratch
+format_check.py
+espn_diag.py
+roster_check.py

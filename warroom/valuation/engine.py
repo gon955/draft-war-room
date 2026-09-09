@@ -29,18 +29,30 @@ NON_STARTING_SLOTS = {"BE", "BN", "BENCH", "IR", "IL", "NA"}
 def default_slot_eligibility(slot: str, positions: tuple[str, ...]) -> bool:
     """Whether a player with `positions` can fill `slot` in a standard NBA league.
 
-    UTIL/UT: anyone. G: a guard (PG/SG/G). F: a forward (SF/PF/F). Otherwise the
-    slot is a specific position and the player must list it.
+    UTIL/UT: anyone. G: a guard (PG/SG/G). F: a forward (SF/PF/F). A combo slot
+    joins alternatives with "/" and means EITHER side, so ESPN's SG/SF, G/F,
+    PF/C and F/C each accept a player matching any one part. Otherwise the slot
+    is a specific position and the player must list it.
+
+    Combo slots must be split rather than matched literally: "PF/C" is never an
+    element of `positions`, so a literal check finds nobody eligible, the slot
+    creates no starter demand, and every replacement level is computed against a
+    shallower league than the real one.
     """
     slot = slot.upper()
     pos = {p.upper() for p in positions}
     if slot in ("UTIL", "UT"):
         return True
-    if slot == "G":
+    return any(_matches_slot_part(part, pos) for part in slot.split("/"))
+
+
+def _matches_slot_part(part: str, pos: set[str]) -> bool:
+    """One side of a slot: a flex letter (G/F) or a literal position."""
+    if part == "G":
         return bool(pos & {"PG", "SG", "G"})
-    if slot == "F":
+    if part == "F":
         return bool(pos & {"SF", "PF", "F"})
-    return slot in pos
+    return part in pos
 
 
 def project_points(player: PlayerProjection, weights: dict[str, float]) -> float:
