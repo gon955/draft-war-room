@@ -10,6 +10,7 @@
 
 TODO (Phase 3).
 """
+
 from fastapi import APIRouter
 
 router = APIRouter(prefix="/boards", tags=["boards"])

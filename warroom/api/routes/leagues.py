@@ -12,6 +12,7 @@ Creation and sync both go through services.sync, never through espn-api here.
 
 TODO (Phase 3).
 """
+
 from fastapi import APIRouter
 
 router = APIRouter(prefix="/leagues", tags=["leagues"])

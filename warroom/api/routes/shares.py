@@ -9,6 +9,7 @@ the sort of thing that leaks who else exists.
 
 TODO (Phase 3).
 """
+
 from fastapi import APIRouter
 
 router = APIRouter(tags=["shares"])

@@ -26,3 +26,305 @@ Every user-owned row must trace to a user_id: that chain is what authz.py walks.
 
 TODO (Phase 1).
 """
+
+import enum
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import Enum, ForeignKey, Index, UniqueConstraint, func, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from warroom.db import Base
+
+# ==============================================================================
+# Helpers & Enums
+# ==============================================================================
+
+
+def enum_column(enum_cls: type[enum.Enum], name: str):
+    """Helper to enforce explicit lowercased enum names and labels in PostgreSQL DDL."""
+    return mapped_column(
+        Enum(enum_cls, name=name, values_callable=lambda e: [x.value for x in e]), nullable=False
+    )
+
+
+class SharePermission(enum.Enum):
+    READ = "read"
+    EDIT = "edit"
+
+
+class ScoringFormat(enum.Enum):
+    POINTS = "points"
+    CATEGORIES = "categories"
+
+
+# ==============================================================================
+# Mixins
+# ==============================================================================
+
+
+class TimestampMixin:
+    """Provides unified audit tracking for temporal-sensitive tables."""
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+# ==============================================================================
+# Models
+# ==============================================================================
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+    __table_args__ = (Index("ix_users_email_lower", text("lower(email)"), unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(nullable=False)
+    password_hash: Mapped[str] = mapped_column(nullable=False)
+
+    # Graph Traversal Anchors
+    leagues: Mapped[list["League"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    boards: Mapped[list["Board"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    shares_received: Mapped[list["BoardShare"]] = relationship(
+        back_populates="shared_with_user", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class League(Base, TimestampMixin):
+    __tablename__ = "leagues"
+    __table_args__ = (UniqueConstraint("user_id", "espn_league_id", "season"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    espn_league_id: Mapped[int] = mapped_column(nullable=False)
+    season: Mapped[int] = mapped_column(nullable=False)
+
+    # Payload
+    name: Mapped[str] = mapped_column(nullable=False)
+    scoring_format: Mapped[ScoringFormat] = enum_column(ScoringFormat, "scoring_format")
+    num_teams: Mapped[int] = mapped_column(nullable=False)
+    roster_size: Mapped[int] = mapped_column(nullable=False)
+    espn_s2_encrypted: Mapped[str | None] = mapped_column(nullable=True)
+
+    # PostgreSQL JSONB Fields (Via db.Base.type_annotation_map)
+    roster_slots: Mapped[dict[str, Any]] = mapped_column(nullable=False)
+    point_weights: Mapped[dict[str, Any]] = mapped_column(nullable=False)
+
+    # Graph Traversal Anchors
+    user: Mapped["User"] = relationship(back_populates="leagues")
+    valuations: Mapped[list["Valuation"]] = relationship(
+        back_populates="league", cascade="all, delete-orphan", passive_deletes=True
+    )
+    boards: Mapped[list["Board"]] = relationship(
+        back_populates="league", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Player(Base, TimestampMixin):
+    """Shared global reference data cached from ESPN; owned by no user (SPEC 0.2)."""
+
+    __tablename__ = "players"
+    __table_args__ = (
+        UniqueConstraint("espn_player_id", "season"),
+        Index("ix_players_season", "season"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    espn_player_id: Mapped[int] = mapped_column(nullable=False)
+    season: Mapped[int] = mapped_column(nullable=False)
+
+    # Payload
+    name: Mapped[str] = mapped_column(nullable=False)
+    pro_team: Mapped[str] = mapped_column(nullable=False)
+
+    # Explicit JSONB mapping bypassing the dict-only map rule
+    positions: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    projections: Mapped[dict[str, Any]] = mapped_column(nullable=False)
+
+    # Graph Traversal Anchors (Accidental global cache mutation must fail loudly)
+    valuations: Mapped[list["Valuation"]] = relationship(back_populates="player")
+    rankings: Mapped[list["Ranking"]] = relationship(back_populates="player")
+    mock_picks: Mapped[list["MockPick"]] = relationship(back_populates="player")
+
+
+class Valuation(Base, TimestampMixin):
+    """The analytical engine's output cache."""
+
+    __tablename__ = "valuations"
+    __table_args__ = (UniqueConstraint("league_id", "player_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leagues.id", ondelete="CASCADE"), nullable=False
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Payload
+    projected_points: Mapped[float] = mapped_column(nullable=False)
+    replacement_points: Mapped[float] = mapped_column(nullable=False)
+    value: Mapped[float] = mapped_column(nullable=False)
+    assigned_slot: Mapped[str] = mapped_column(nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+
+    # Graph Traversal Anchors
+    league: Mapped["League"] = relationship(back_populates="valuations")
+    player: Mapped["Player"] = relationship(back_populates="valuations")
+
+
+class Board(Base, TimestampMixin):
+    """A user-owned sandbox supporting multiple strategies per league."""
+
+    __tablename__ = "boards"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leagues.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Payload
+    name: Mapped[str] = mapped_column(nullable=False)
+
+    # Graph Traversal Anchors
+    user: Mapped["User"] = relationship(back_populates="boards")
+    league: Mapped["League"] = relationship(back_populates="boards")
+    tiers: Mapped[list["Tier"]] = relationship(
+        back_populates="board", cascade="all, delete-orphan", passive_deletes=True
+    )
+    rankings: Mapped[list["Ranking"]] = relationship(
+        back_populates="board", cascade="all, delete-orphan", passive_deletes=True
+    )
+    mock_drafts: Mapped[list["MockDraft"]] = relationship(
+        back_populates="board", cascade="all, delete-orphan", passive_deletes=True
+    )
+    shares: Mapped[list["BoardShare"]] = relationship(
+        back_populates="board", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class Tier(Base):
+    __tablename__ = "tiers"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    board_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
+    )
+    sort_order: Mapped[int] = mapped_column(nullable=False)
+
+    # Payload
+    label: Mapped[str] = mapped_column(nullable=False)
+    color: Mapped[str | None] = mapped_column(nullable=True)
+
+    # Graph Traversal Anchors
+    board: Mapped["Board"] = relationship(back_populates="tiers")
+    rankings: Mapped[list["Ranking"]] = relationship(back_populates="tier")
+
+
+class Ranking(Base, TimestampMixin):
+    """The high-throughput CRUD table handling user rankings."""
+
+    __tablename__ = "rankings"
+    __table_args__ = (
+        UniqueConstraint("board_id", "player_id"),
+        Index("ix_rankings_board_id_user_rank", "board_id", "user_rank"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    board_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("players.id", ondelete="RESTRICT"), nullable=False
+    )
+    tier_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tiers.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Nullable indicates no manual override has occurred
+    user_rank: Mapped[int | None] = mapped_column(nullable=True)
+
+    # Payload
+    note: Mapped[str | None] = mapped_column(nullable=True)
+    is_target: Mapped[bool] = mapped_column(
+        default=False, server_default=text("false"), nullable=False
+    )
+    is_avoid: Mapped[bool] = mapped_column(
+        default=False, server_default=text("false"), nullable=False
+    )
+
+    # Graph Traversal Anchors
+    board: Mapped["Board"] = relationship(back_populates="rankings")
+    player: Mapped["Player"] = relationship(back_populates="rankings")
+    tier: Mapped["Tier | None"] = relationship(back_populates="rankings")
+
+
+class MockDraft(Base, TimestampMixin):
+    __tablename__ = "mock_drafts"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    board_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Payload
+    name: Mapped[str] = mapped_column(nullable=False)
+    my_draft_slot: Mapped[int] = mapped_column(nullable=False)
+
+    # Graph Traversal Anchors
+    board: Mapped["Board"] = relationship(back_populates="mock_drafts")
+    picks: Mapped[list["MockPick"]] = relationship(
+        back_populates="mock_draft", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class MockPick(Base):
+    __tablename__ = "mock_picks"
+    __table_args__ = (UniqueConstraint("mock_draft_id", "pick_number"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    mock_draft_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mock_drafts.id", ondelete="CASCADE"), nullable=False
+    )
+    player_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("players.id", ondelete="RESTRICT"), nullable=True
+    )
+    pick_number: Mapped[int] = mapped_column(nullable=False)
+    # Payload
+    round: Mapped[int] = mapped_column(nullable=False)
+    team_slot: Mapped[int] = mapped_column(nullable=False)
+    is_mine: Mapped[bool] = mapped_column(
+        default=False, server_default=text("false"), nullable=False
+    )
+    # Graph Traversal Anchors
+    mock_draft: Mapped["MockDraft"] = relationship(back_populates="picks")
+    player: Mapped["Player | None"] = relationship(back_populates="mock_picks")
+
+
+class BoardShare(Base, TimestampMixin):
+    __tablename__ = "board_shares"
+    __table_args__ = (UniqueConstraint("board_id", "shared_with_user_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    board_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("boards.id", ondelete="CASCADE"), nullable=False
+    )
+    shared_with_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    permission: Mapped[SharePermission] = enum_column(SharePermission, "share_permission")
+    # Graph Traversal Anchors
+    board: Mapped["Board"] = relationship(back_populates="shares")
+    shared_with_user: Mapped["User"] = relationship(back_populates="shares_received")

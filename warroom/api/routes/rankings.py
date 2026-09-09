@@ -11,6 +11,7 @@ id-scoped routes must resolve the ranking to its board before authorizing.
 
 TODO (Phase 3).
 """
+
 from fastapi import APIRouter
 
 router = APIRouter(tags=["rankings"])

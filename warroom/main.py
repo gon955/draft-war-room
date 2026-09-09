@@ -6,6 +6,7 @@ Routers are registered here as each one is built; the includes stay commented
 until the router behind them exists, so the app never advertises an endpoint it
 cannot serve.
 """
+
 from fastapi import FastAPI
 
 

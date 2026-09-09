@@ -16,6 +16,7 @@ Definitions used here (documented so they can be defended in review):
     with the lowest replacement level, which maximizes their value over
     replacement (you'd play them where they help most).
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable

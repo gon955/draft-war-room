@@ -5,6 +5,7 @@ The payloads below mirror the shape of the live league's raw JSON (SPEC 2.2):
 directly is what keeps the mapping honest without a network call — EspnDataSource
 itself adds only fetching, which is stubbed in TestEspnDataSource.
 """
+
 from typing import Any, ClassVar
 
 import pytest
@@ -32,16 +33,16 @@ RAW_SETTINGS: dict[str, Any] = {
     "size": 10,
     "rosterSettings": {
         "lineupSlotCounts": {
-            "0": 1,   # PG
-            "1": 0,   # SG      — unused, no starter demand
-            "2": 0,   # SF      — unused
-            "3": 0,   # PF      — unused
-            "4": 0,   # C       — unused
-            "5": 1,   # G
-            "6": 0,   # F       — unused
-            "7": 1,   # SG/SF   — combo
-            "8": 1,   # G/F     — combo
-            "9": 2,   # PF/C    — combo
+            "0": 1,  # PG
+            "1": 0,  # SG      — unused, no starter demand
+            "2": 0,  # SF      — unused
+            "3": 0,  # PF      — unused
+            "4": 0,  # C       — unused
+            "5": 1,  # G
+            "6": 0,  # F       — unused
+            "7": 1,  # SG/SF   — combo
+            "8": 1,  # G/F     — combo
+            "9": 2,  # PF/C    — combo
             "10": 0,  # F/C     — unused
             "11": 2,  # UT
             "12": 5,  # BE      — bench, excluded
@@ -52,14 +53,14 @@ RAW_SETTINGS: dict[str, Any] = {
     "scoringSettings": {
         "scoringType": "H2H_POINTS",
         "scoringItems": [
-            {"statId": 0, "points": 1.0},    # PTS
-            {"statId": 6, "points": 1.2},    # REB
-            {"statId": 3, "points": 1.5},    # AST
-            {"statId": 2, "points": 3.0},    # STL
-            {"statId": 1, "points": 3.0},    # BLK
+            {"statId": 0, "points": 1.0},  # PTS
+            {"statId": 6, "points": 1.2},  # REB
+            {"statId": 3, "points": 1.5},  # AST
+            {"statId": 2, "points": 3.0},  # STL
+            {"statId": 1, "points": 3.0},  # BLK
             {"statId": 11, "points": -1.0},  # TO
-            {"statId": 17, "points": 0.5},   # 3PM
-            {"statId": 19, "points": 0.0},   # FG% — present but unscored
+            {"statId": 17, "points": 0.5},  # 3PM
+            {"statId": 19, "points": 0.0},  # FG% — present but unscored
         ],
     },
 }
@@ -83,7 +84,12 @@ class TestScoringFormat:
 class TestStartingSlots:
     def test_reads_the_real_roster_shape(self):
         assert starting_slots_from_raw(RAW_SETTINGS) == {
-            "PG": 1, "G": 1, "SG/SF": 1, "G/F": 1, "PF/C": 2, "UT": 2,
+            "PG": 1,
+            "G": 1,
+            "SG/SF": 1,
+            "G/F": 1,
+            "PF/C": 2,
+            "UT": 2,
         }
 
     def test_eight_starters_per_team(self):
@@ -110,8 +116,13 @@ class TestStartingSlots:
 class TestPointWeights:
     def test_weights_are_lowercase_stat_codes(self):
         assert point_weights_from_raw(RAW_SETTINGS) == {
-            "pts": 1.0, "reb": 1.2, "ast": 1.5,
-            "stl": 3.0, "blk": 3.0, "to": -1.0, "3pm": 0.5,
+            "pts": 1.0,
+            "reb": 1.2,
+            "ast": 1.5,
+            "stl": 3.0,
+            "blk": 3.0,
+            "to": -1.0,
+            "3pm": 0.5,
         }
 
     def test_unscored_stats_are_dropped(self):
@@ -129,7 +140,12 @@ class TestLeagueSettingsFromRaw:
         assert settings.scoring_format == "points"
         assert settings.num_teams == 10
         assert settings.roster_slots == {
-            "PG": 1, "G": 1, "SG/SF": 1, "G/F": 1, "PF/C": 2, "UT": 2,
+            "PG": 1,
+            "G": 1,
+            "SG/SF": 1,
+            "G/F": 1,
+            "PF/C": 2,
+            "UT": 2,
         }
         assert settings.point_weights["stl"] == 3.0
 
@@ -137,10 +153,7 @@ class TestLeagueSettingsFromRaw:
         # End to end on the fixture: a slot label the engine can't match would
         # fall back to 0.0 and quietly inflate every value at that slot.
         settings = league_settings_from_raw(RAW_SETTINGS)
-        pool = [
-            _projection(i, ("PG", "SG", "SF", "PF", "C"), pts=100 - i)
-            for i in range(100)
-        ]
+        pool = [_projection(i, ("PG", "SG", "SF", "PF", "C"), pts=100 - i) for i in range(100)]
         points = {p.espn_player_id: p.stats["pts"] for p in pool}
         repl = compute_replacement_levels(pool, settings, points)
         assert set(repl) == set(settings.roster_slots)
@@ -222,11 +235,14 @@ class _StubPlayer:
         self.position = position
         self.proTeam = pro_team
         self.stats = (
-            {f"{SEASON}_projected": {"total": {"PTS": pts}}} if pts is not None
+            {f"{SEASON}_projected": {"total": {"PTS": pts}}}
+            if pts is not None
             # An unprojected season: ESPN returns the splits, all empty. Verified
             # against the live league — every 2027 split came back with n=0.
-            else {f"{SEASON}_{split}": {"total": {}} for split in
-                  ("total", "last_7", "last_15", "last_30")}
+            else {
+                f"{SEASON}_{split}": {"total": {}}
+                for split in ("total", "last_7", "last_15", "last_30")
+            }
         )
 
 
@@ -306,7 +322,7 @@ class TestEspnDataSource:
         star = next(p for p in source.get_player_pool(19048, SEASON) if p.espn_player_id == 3)
         assert star.name == "Rostered Star"
         assert star.pro_team == "LAL"
-        assert star.positions == ("C",)      # PF/C and UT stripped
+        assert star.positions == ("C",)  # PF/C and UT stripped
         assert star.stats == {"pts": 2000.0}
 
     def test_pool_is_deep_enough_to_reach_replacement(self):
@@ -318,8 +334,10 @@ class TestEspnDataSource:
         # ESPN only projects the top few hundred; a deep bench player really is
         # worth ~0 and must not take the whole sync down.
         league = _StubLeague(
-            [_StubPlayer(1, "Star", ["PG", "UT"], pts=1500),
-             _StubPlayer(2, "Deep Bench", ["C", "UT"], pts=None)],
+            [
+                _StubPlayer(1, "Star", ["PG", "UT"], pts=1500),
+                _StubPlayer(2, "Deep Bench", ["C", "UT"], pts=None),
+            ],
             [],
         )
         pool = StubbedEspnDataSource(league).get_player_pool(19048, SEASON)
@@ -329,8 +347,10 @@ class TestEspnDataSource:
         # SPEC 5: an all-zero pool ranks into meaningless order rather than
         # failing, so the adapter refuses to hand it over.
         league = _StubLeague(
-            [_StubPlayer(1, "Star", ["PG", "UT"], pts=None),
-             _StubPlayer(2, "Other", ["C", "UT"], pts=None)],
+            [
+                _StubPlayer(1, "Star", ["PG", "UT"], pts=None),
+                _StubPlayer(2, "Other", ["C", "UT"], pts=None),
+            ],
             [],
         )
         with pytest.raises(ProjectionsUnavailable, match=f"season {SEASON}"):
@@ -352,6 +372,8 @@ def _projection(player_id, positions, pts):
     from warroom.valuation.domain import PlayerProjection
 
     return PlayerProjection(
-        espn_player_id=player_id, name=f"p{player_id}",
-        positions=positions, stats={"pts": float(pts)},
+        espn_player_id=player_id,
+        name=f"p{player_id}",
+        positions=positions,
+        stats={"pts": float(pts)},
     )

@@ -7,6 +7,7 @@
 
 TODO (Phase 4).
 """
+
 from fastapi import APIRouter
 
 router = APIRouter(prefix="/leagues", tags=["players", "valuations"])

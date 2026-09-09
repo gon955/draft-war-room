@@ -174,27 +174,38 @@ Files (already written, 12 unit tests passing, ruff-clean): `domain.py`, `engine
 ```python
 NON_STARTING_SLOTS = {"BE", "BN", "BENCH", "IR", "IL", "NA"}
 
+
 def default_slot_eligibility(slot, positions):
-    slot = slot.upper(); pos = {p.upper() for p in positions}
-    if slot in ("UTIL", "UT"): return True
-    if slot == "G": return bool(pos & {"PG", "SG", "G"})
-    if slot == "F": return bool(pos & {"SF", "PF", "F"})
+    slot = slot.upper()
+    pos = {p.upper() for p in positions}
+    if slot in ("UTIL", "UT"):
+        return True
+    if slot == "G":
+        return bool(pos & {"PG", "SG", "G"})
+    if slot == "F":
+        return bool(pos & {"SF", "PF", "F"})
     return slot in pos
+
 
 def project_points(player, weights):
     return sum(player.stats.get(s, 0.0) * w for s, w in weights.items())
 
+
 def compute_replacement_levels(players, settings, points, eligibility=default_slot_eligibility):
     replacement = {}
     for slot, count in settings.roster_slots.items():
-        if slot.upper() in NON_STARTING_SLOTS or count <= 0: continue
+        if slot.upper() in NON_STARTING_SLOTS or count <= 0:
+            continue
         eligible = [p for p in players if eligibility(slot, p.positions)]
-        if not eligible: replacement[slot] = 0.0; continue
+        if not eligible:
+            replacement[slot] = 0.0
+            continue
         eligible.sort(key=lambda p: points[p.espn_player_id], reverse=True)
         n_starters = settings.num_teams * count
-        idx = min(n_starters - 1, len(eligible) - 1)   # last starter, clamped
+        idx = min(n_starters - 1, len(eligible) - 1)  # last starter, clamped
         replacement[slot] = points[eligible[idx].espn_player_id]
     return replacement
+
 
 def value_over_replacement(players, settings, eligibility=default_slot_eligibility):
     if settings.scoring_format != "points":

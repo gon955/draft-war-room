@@ -9,6 +9,7 @@ This module is the ONLY place that knows ESPN's vocabulary — lineupSlotCounts,
 scoringItems, statId, eligibleSlots. Everything downstream sees LeagueSettings
 and PlayerProjection. If ESPN changes their undocumented API, one file changes.
 """
+
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable

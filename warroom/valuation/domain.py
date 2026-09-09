@@ -4,6 +4,7 @@ These are framework-free on purpose: the engine and its tests depend only on
 these, not on SQLAlchemy, FastAPI, or ESPN. The persistence layer maps its rows
 to/from these; the ESPN adapter produces PlayerProjection / LeagueSettings.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ class PlayerProjection:
     "blk", "tpm", "to", "fgm", "fga", "ftm", "fta"). Only the stats your league
     scores need weights; missing stats are treated as 0 at valuation time.
     """
+
     espn_player_id: int
     name: str
     positions: tuple[str, ...]
@@ -33,7 +35,8 @@ class LeagueSettings:
     `point_weights` is the league's own per-stat scoring, e.g.
     {"pts": 1.0, "reb": 1.2, "ast": 1.5, "stl": 3.0, "blk": 3.0, "to": -1.0}.
     """
-    scoring_format: str                       # "points" | "categories"
+
+    scoring_format: str  # "points" | "categories"
     num_teams: int
     roster_slots: dict[str, int]
     point_weights: dict[str, float] = field(default_factory=dict)
@@ -43,8 +46,9 @@ class LeagueSettings:
 @dataclass(frozen=True)
 class PlayerValue:
     """One player's valuation result."""
+
     player: PlayerProjection
     projected_points: float
     replacement_points: float
-    value: float           # projected_points - replacement_points
-    assigned_slot: str     # the slot the player is credited at (their scarcest)
+    value: float  # projected_points - replacement_points
+    assigned_slot: str  # the slot the player is credited at (their scarcest)

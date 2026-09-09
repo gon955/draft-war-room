@@ -3,6 +3,7 @@
 Every expected number here is computed by hand in the comments, so a failure
 points at a real logic change, not a mystery. No DB, no network.
 """
+
 from typing import ClassVar
 
 import pytest
@@ -20,7 +21,9 @@ from warroom.valuation.engine import (
 def P(pid, positions, pts, **stats):
     """Terse player builder; `pts` is the 'pts' stat, extras via kwargs."""
     return PlayerProjection(
-        espn_player_id=pid, name=f"P{pid}", positions=tuple(positions),
+        espn_player_id=pid,
+        name=f"P{pid}",
+        positions=tuple(positions),
         stats={"pts": pts, **stats},
     )
 
@@ -37,8 +40,8 @@ class TestProjectPoints:
 
     def test_turnovers_reduce_score_via_negative_weight(self):
         weights = {"pts": 1.0, "to": -1.0}
-        clean = P(1, ["PG"], 20, to=1)   # 20 - 1 = 19
-        loose = P(2, ["PG"], 20, to=5)   # 20 - 5 = 15
+        clean = P(1, ["PG"], 20, to=1)  # 20 - 1 = 19
+        loose = P(2, ["PG"], 20, to=5)  # 20 - 5 = 15
         assert project_points(clean, weights) > project_points(loose, weights)
 
     def test_unweighted_stats_are_ignored(self):
@@ -69,16 +72,22 @@ class TestProjectPoints:
 @pytest.fixture
 def league():
     return LeagueSettings(
-        scoring_format="points", num_teams=2,
-        roster_slots={"PG": 1, "C": 1, "UTIL": 1}, point_weights={"pts": 1.0},
+        scoring_format="points",
+        num_teams=2,
+        roster_slots={"PG": 1, "C": 1, "UTIL": 1},
+        point_weights={"pts": 1.0},
     )
 
 
 @pytest.fixture
 def pool():
     return [
-        P(1, ["PG"], 50), P(2, ["PG"], 40), P(3, ["PG"], 30),
-        P(4, ["C"], 45), P(5, ["C"], 20), P(6, ["C"], 10),
+        P(1, ["PG"], 50),
+        P(2, ["PG"], 40),
+        P(3, ["PG"], 30),
+        P(4, ["C"], 45),
+        P(5, ["C"], 20),
+        P(6, ["C"], 10),
         P(7, ["SF"], 25),
     ]
 
@@ -116,8 +125,9 @@ class TestValueOverReplacement:
         assert p7.value == -20.0  # 25 - 45
 
     def test_rejects_categories_league(self, pool):
-        cats = LeagueSettings(scoring_format="categories", num_teams=2,
-                              roster_slots={"PG": 1}, point_weights={})
+        cats = LeagueSettings(
+            scoring_format="categories", num_teams=2, roster_slots={"PG": 1}, point_weights={}
+        )
         with pytest.raises(ValueError):
             value_over_replacement(pool, cats)
 
@@ -132,8 +142,10 @@ class TestMultiEligibility:
         #   c is PG/C: min(30,25,30)=25 (C) -> value 25-25=0, slot C
         #   if c were forced to PG: 25-30 = -5, so choosing C is correct.
         settings = LeagueSettings(
-            scoring_format="points", num_teams=1,
-            roster_slots={"PG": 1, "C": 1, "UTIL": 1}, point_weights={"pts": 1.0},
+            scoring_format="points",
+            num_teams=1,
+            roster_slots={"PG": 1, "C": 1, "UTIL": 1},
+            point_weights={"pts": 1.0},
         )
         players = [P("a", ["PG"], 30), P("b", ["C"], 20), P("c", ["PG", "C"], 25)]
         ranked = value_over_replacement(players, settings)
@@ -147,8 +159,10 @@ class TestUnderfilledPosition:
         # slots C:2, num_teams=2 -> 4 starters needed, but only 2 centers exist.
         # replacement clamps to the worst available center (index -1).
         settings = LeagueSettings(
-            scoring_format="points", num_teams=2,
-            roster_slots={"C": 2}, point_weights={"pts": 1.0},
+            scoring_format="points",
+            num_teams=2,
+            roster_slots={"C": 2},
+            point_weights={"pts": 1.0},
         )
         players = [P(1, ["C"], 40), P(2, ["C"], 10)]
         points = {p.espn_player_id: p.stats["pts"] for p in players}
@@ -205,8 +219,10 @@ class TestComboSlotEligibility:
         #   PF/C pool sorted: p1(PF)=30, p2(C)=20 -> last starter = 1st = 30
         # Before the fix the pool was empty and replacement fell back to 0.0.
         settings = LeagueSettings(
-            scoring_format="points", num_teams=1,
-            roster_slots={"PF/C": 1}, point_weights={"pts": 1.0},
+            scoring_format="points",
+            num_teams=1,
+            roster_slots={"PF/C": 1},
+            point_weights={"pts": 1.0},
         )
         players = [P(1, ["PF"], 30), P(2, ["C"], 20), P(3, ["PG"], 10)]
         points = {p.espn_player_id: p.stats["pts"] for p in players}
@@ -223,14 +239,23 @@ class TestRealLeagueRoster:
     Every configured starting slot must find eligible players; a slot that
     matches nobody is the signature of an unhandled slot label.
     """
+
     SLOTS: ClassVar[dict[str, int]] = {
-        "PG": 1, "G": 1, "SG/SF": 1, "G/F": 1, "PF/C": 2, "UT": 2,
+        "PG": 1,
+        "G": 1,
+        "SG/SF": 1,
+        "G/F": 1,
+        "PF/C": 2,
+        "UT": 2,
     }
 
     def test_every_starting_slot_has_eligible_players(self):
         squad = [
-            P(1, ["PG"], 40), P(2, ["SG"], 35), P(3, ["SF"], 30),
-            P(4, ["PF"], 25), P(5, ["C"], 20),
+            P(1, ["PG"], 40),
+            P(2, ["SG"], 35),
+            P(3, ["SF"], 30),
+            P(4, ["PF"], 25),
+            P(5, ["C"], 20),
         ]
         for slot in self.SLOTS:
             assert any(default_slot_eligibility(slot, p.positions) for p in squad), (
@@ -239,8 +264,10 @@ class TestRealLeagueRoster:
 
     def test_replacement_reflects_all_eight_starters(self):
         settings = LeagueSettings(
-            scoring_format="points", num_teams=10,
-            roster_slots=self.SLOTS, point_weights={"pts": 1.0},
+            scoring_format="points",
+            num_teams=10,
+            roster_slots=self.SLOTS,
+            point_weights={"pts": 1.0},
         )
         pool = [P(i, ["PG", "SG", "SF", "PF", "C"], 100 - i) for i in range(100)]
         points = {p.espn_player_id: p.stats["pts"] for p in pool}
