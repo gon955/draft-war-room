@@ -2,9 +2,16 @@
 
 Run locally with:  uvicorn warroom.main:app --reload
 
-Routers are registered here as each one is built; the includes stay commented
-until the router behind them exists, so the app never advertises an endpoint it
-cannot serve.
+Every router is registered below. Most are still empty APIRouters carrying only
+their docstring, so including them adds no routes and advertises nothing the app
+cannot serve — each one starts serving the moment its handlers land, with no
+edit needed here.
+
+Note the two ways to get an app. `create_app()` builds a fresh, isolated one and
+is what the test suite uses, so its dependency_overrides touch only that
+instance. The module-level `app` below exists for `uvicorn warroom.main:app`.
+Overriding a dependency on the wrong one of those is silent: the request runs
+against the un-overridden app and nothing complains.
 """
 
 from fastapi import FastAPI
@@ -14,7 +21,6 @@ def create_app() -> FastAPI:
     """Build the application. A factory so tests can construct an isolated app."""
     app = FastAPI(title="Draft War Room", version="0.1.0")
 
-    # TODO: uncomment each as the router lands (SPEC 4).
     from warroom.api.routes import (
         auth,
         boards,

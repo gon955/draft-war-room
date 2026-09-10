@@ -1,4 +1,4 @@
-"""Register / login / token / current-user payloads (SPEC 4). TODO (Phase 2)."""
+"""Register / login / token / current-user payloads (SPEC 4)."""
 
 import uuid
 from datetime import datetime
