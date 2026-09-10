@@ -1,10 +1,8 @@
 """Auth routes (SPEC 4).
 
-    POST /auth/register   public   409 on a duplicate email
-    POST /auth/login      public   -> {access_token}
-    GET  /auth/me         authed   401 without a token
-
-TODO (Phase 2).
+POST /auth/register   public   409 on a duplicate email
+POST /auth/login      public   -> {access_token}
+GET  /auth/me         authed   401 without a token
 """
 
 from fastapi import APIRouter, HTTPException, status

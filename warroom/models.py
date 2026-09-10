@@ -23,8 +23,6 @@ Tables, and the constraints that carry meaning rather than decoration:
                  the many-to-many that makes authz interesting
 
 Every user-owned row must trace to a user_id: that chain is what authz.py walks.
-
-TODO (Phase 1).
 """
 
 import enum
@@ -76,11 +74,22 @@ class ScoringFormat(enum.Enum):
 
 
 class TimestampMixin:
-    """Provides unified audit tracking for temporal-sensitive tables."""
+    """Provides unified audit tracking for temporal-sensitive tables.
 
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    clock_timestamp(), not now(). Postgres `now()` is transaction_timestamp():
+    it returns the moment the transaction began, so every row written or touched
+    in one transaction shares a timestamp and updated_at never advances past
+    created_at. That makes the audit columns useless for anything batched — and
+    it makes the whole integration suite, which runs each test in a single
+    transaction, unable to tell an update from an insert. clock_timestamp()
+    reads the actual wall clock per statement.
+    """
+
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.clock_timestamp(), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        server_default=func.now(), onupdate=func.now(), nullable=False
+        server_default=func.clock_timestamp(), onupdate=func.clock_timestamp(), nullable=False
     )
 
 
