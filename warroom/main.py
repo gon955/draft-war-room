@@ -15,11 +15,19 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Draft War Room", version="0.1.0")
 
     # TODO: uncomment each as the router lands (SPEC 4).
-    # from warroom.api.routes import (
-    #     auth, boards, leagues, mocks, players, rankings, shares, tiers,
-    # )
-    # for module in (auth, leagues, players, boards, rankings, tiers, mocks, shares):
-    #     app.include_router(module.router)
+    from warroom.api.routes import (
+        auth,
+        boards,
+        leagues,
+        mocks,
+        players,
+        rankings,
+        shares,
+        tiers,
+    )
+
+    for module in (auth, leagues, players, boards, rankings, tiers, mocks, shares):
+        app.include_router(module.router)
 
     @app.get("/health", tags=["meta"])
     def health() -> dict[str, str]:
