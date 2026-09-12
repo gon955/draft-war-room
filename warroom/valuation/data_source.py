@@ -26,6 +26,8 @@ REAL_POSITIONS = frozenset({"PG", "SG", "SF", "PF", "C"})
 # deep enough that every starting slot reaches its replacement level.
 FREE_AGENT_POOL_SIZE = 400
 
+OFF_ROSTER_SLOTS = frozenset({"IR", "IL", "NA"})
+
 
 class ProjectionsUnavailable(RuntimeError):
     """ESPN returned a player pool with no projections for the requested season.
@@ -123,7 +125,37 @@ def league_settings_from_raw(raw_settings: dict[str, Any]) -> LeagueSettings:
         num_teams=int(raw_settings["size"]),
         roster_slots=starting_slots_from_raw(raw_settings),
         point_weights=point_weights_from_raw(raw_settings),
+        roster_size=roster_size_from_raw(raw_settings),
     )
+
+
+def roster_size_from_raw(raw_settings: dict[str, Any]) -> int:
+    """Total roster spots per team: starters plus bench, IR excluded.
+
+    Not derivable from starting_slots_from_raw, which drops bench seats on
+    purpose — they create no starter demand, so the engine must not see them.
+    Bench depth survives only here. IR/IL/NA are excluded because they are
+    extra capacity for injured players, not roster spots to draft into.
+    """
+    from espn_api.basketball.constant import POSITION_MAP
+
+    lineup_counts = raw_settings.get("rosterSettings", {}).get("lineupSlotCounts", {})
+
+    total_size = 0
+    for slot_id_str, count in lineup_counts.items():
+        if count <= 0:
+            continue
+
+        label = POSITION_MAP.get(int(slot_id_str))
+        # An unknown id or ESPN's blank slot is not a roster spot. Without
+        # this, label is None, `None not in OFF_ROSTER_SLOTS` is True, and
+        # every slot ESPN adds in future silently inflates the roster.
+        if not label or label.upper() in OFF_ROSTER_SLOTS:
+            continue
+
+        total_size += count
+
+    return total_size
 
 
 def positions_of(eligible_slots: list[str], default_position: str = "") -> tuple[str, ...]:

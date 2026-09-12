@@ -175,6 +175,7 @@ class TestNullability:
             ("users", "password_hash"),
             ("leagues", "point_weights"),
             ("leagues", "roster_slots"),
+            ("leagues", "roster_size"),
             ("players", "projections"),
             ("valuations", "value"),
             ("board_shares", "permission"),

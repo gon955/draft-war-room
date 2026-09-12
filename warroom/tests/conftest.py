@@ -33,6 +33,7 @@ import os
 from collections.abc import Callable, Iterator
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, make_url
 from sqlalchemy.orm import Session
@@ -165,6 +166,10 @@ def league_settings() -> LeagueSettings:
         scoring_format="points",
         num_teams=2,
         roster_slots={"PG": 1, "C": 1, "UTIL": 1},
+        # Matches the `league` fixture's column. Left at its 0 default, a sync
+        # test would watch the seeded 13 get overwritten with 0 and have to
+        # assert that, which says nothing about whether sync works.
+        roster_size=13,
         point_weights={"pts": 1.0},
     )
 
@@ -181,6 +186,30 @@ def player_pool() -> list[PlayerProjection]:
         )
         for espn_id, name, positions, points in SPEC_53_POOL
     ]
+
+
+@pytest.fixture
+def fernet_key(monkeypatch) -> Iterator[str]:
+    """A generated FERNET_KEY for the duration of one test.
+
+    Generated rather than read from the environment so the suite needs no key of
+    its own — CI's env block has none, and .env is absent there entirely.
+
+    Patches the cached Settings instance rather than the environment, because
+    Settings also reads .env (config.py) and an env var alone does not decide
+    what the app sees. crypto._fernet is lru_cached, so it is cleared on both
+    sides: a Fernet built from another key earlier in the session would
+    otherwise outlive the key set here.
+    """
+    from warroom import crypto
+
+    key = Fernet.generate_key().decode()
+    crypto._fernet.cache_clear()
+    monkeypatch.setattr(get_settings(), "fernet_key", key)
+
+    yield key
+
+    crypto._fernet.cache_clear()
 
 
 @pytest.fixture

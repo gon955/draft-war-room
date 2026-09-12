@@ -76,3 +76,6 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 def get_data_source() -> PlayerDataSource:
     settings = get_settings()
     return EspnDataSource(espn_s2=settings.espn_s2, swid=settings.espn_swid)
+
+
+DataSource = Annotated[PlayerDataSource, Depends(get_data_source)]
