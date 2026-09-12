@@ -34,6 +34,10 @@ class LeagueSettings:
     {"PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UTIL": 3}.
     `point_weights` is the league's own per-stat scoring, e.g.
     {"pts": 1.0, "reb": 1.2, "ast": 1.5, "stl": 3.0, "blk": 3.0, "to": -1.0}.
+    `roster_size` is the TOTAL roster — starters plus bench, IR excluded — so
+    it is not derivable from `roster_slots`, which drops bench seats because
+    they create no starter demand. Defaults to 0 so a settings object built
+    by hand (the engine's tests, the fake data source) need not supply it.
     """
 
     scoring_format: str  # "points" | "categories"
@@ -41,6 +45,7 @@ class LeagueSettings:
     roster_slots: dict[str, int]
     point_weights: dict[str, float] = field(default_factory=dict)
     categories: tuple[str, ...] | None = None
+    roster_size: int = 0
 
 
 @dataclass(frozen=True)
