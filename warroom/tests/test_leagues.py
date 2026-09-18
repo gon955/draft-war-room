@@ -13,12 +13,13 @@ a refused sync must leave no half-written league behind.
 import uuid
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import func, select
 
-from warroom.crypto import decrypt
+from warroom.crypto import decrypt, encrypt
 from warroom.models import Board, League, Player, Ranking
 from warroom.tests.conftest import ESPN_LEAGUE_ID, SEASON
-from warroom.valuation.data_source import FakePlayerDataSource
+from warroom.valuation.data_source import FakePlayerDataSource, fixed_source_factory
 
 OTHER_ESPN_ID = 27311
 COOKIE = "AEBxK%2FvN0pQ3rLm8" + "Xy7" * 40
@@ -30,10 +31,10 @@ def create_payload(espn_league_id=OTHER_ESPN_ID, season=SEASON, name="Another Le
 
 def use_empty_pool(client, league_settings):
     """Point the app at a source that returns no players."""
-    from warroom.deps import get_data_source
+    from warroom.deps import get_data_source_factory
 
-    client.app.dependency_overrides[get_data_source] = lambda: FakePlayerDataSource(
-        settings=league_settings, players=[]
+    client.app.dependency_overrides[get_data_source_factory] = lambda: fixed_source_factory(
+        FakePlayerDataSource(settings=league_settings, players=[])
     )
 
 
@@ -136,6 +137,134 @@ class TestTheEspnCookie:
             )
             is None
         )
+
+
+class TestAnUnconfiguredServer:
+    """FERNET_KEY unset — an operator error, reported as one.
+
+    crypto.encrypt refusing a plaintext fallback is correct and not negotiable;
+    the only question is what the caller sees. Uncaught, MissingFernetKey came
+    back as a bare 500, which sends whoever reads it hunting for a bug in the
+    app instead of a missing variable in the environment.
+
+    The `fernet_key` fixture is deliberately absent from these tests: they need
+    the key NOT to be configured.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_fernet_key(self, monkeypatch):
+        from warroom import crypto
+        from warroom.config import get_settings
+
+        crypto._fernet.cache_clear()
+        monkeypatch.setattr(get_settings(), "fernet_key", None)
+        yield
+        crypto._fernet.cache_clear()
+
+    def test_connecting_a_private_league_is_503(self, client, auth_a):
+        r = client.post("/leagues", headers=auth_a, json=create_payload(espn_s2=COOKIE))
+
+        assert r.status_code == 503
+        assert "FERNET_KEY" in r.json()["detail"]
+
+    def test_the_refused_league_is_not_written(self, client, db, auth_a):
+        client.post("/leagues", headers=auth_a, json=create_payload(espn_s2=COOKIE))
+
+        assert db.scalar(select(func.count()).select_from(League)) == 0
+
+    def test_a_public_league_is_unaffected(self, client, auth_a):
+        """No cookie means encrypt() is never called, so an unconfigured server
+        still serves every public league — which is why this is not a startup
+        check."""
+        assert client.post("/leagues", headers=auth_a, json=create_payload()).status_code == 201
+
+    def test_syncing_a_public_league_is_unaffected(self, client, auth_a, league):
+        assert client.post(f"/leagues/{league.id}/sync", headers=auth_a).status_code == 200
+
+
+class TestTheCookieReachesEspn:
+    """Storing the cookie is only half the job — it has to be used.
+
+    The whole point of a per-league credential is that a PRIVATE league is read
+    with the cookie its owner supplied. Encrypting it into a column nobody ever
+    decrypts looks identical from the outside: create still 201s, sync still
+    200s, and both are quietly talking to ESPN as whoever the server is.
+    """
+
+    @staticmethod
+    def _recording_factory(client, fake_data_source):
+        """Override the factory and capture the cookie each call is handed."""
+        from warroom.deps import get_data_source_factory
+
+        seen: list[str | None] = []
+
+        def factory(espn_s2=None):
+            seen.append(espn_s2)
+            return fake_data_source
+
+        client.app.dependency_overrides[get_data_source_factory] = lambda: factory
+        return seen
+
+    def test_create_fetches_with_the_cookie_from_the_payload(
+        self, client, auth_a, fake_data_source, fernet_key
+    ):
+        seen = self._recording_factory(client, fake_data_source)
+
+        r = client.post("/leagues", headers=auth_a, json=create_payload(espn_s2=COOKIE))
+
+        assert r.status_code == 201
+        # Plaintext, straight from the payload: encryption is for the column.
+        assert seen == [COOKIE]
+
+    def test_create_without_a_cookie_passes_none(self, client, auth_a, fake_data_source):
+        seen = self._recording_factory(client, fake_data_source)
+
+        client.post("/leagues", headers=auth_a, json=create_payload())
+
+        assert seen == [None]
+
+    def test_sync_fetches_with_the_leagues_decrypted_cookie(
+        self, client, db, auth_a, league, fake_data_source, fernet_key
+    ):
+        league.espn_s2_encrypted = encrypt(COOKIE)
+        db.commit()
+        seen = self._recording_factory(client, fake_data_source)
+
+        r = client.post(f"/leagues/{league.id}/sync", headers=auth_a)
+
+        assert r.status_code == 200
+        assert seen == [COOKIE]
+
+    def test_sync_of_a_public_league_passes_none(self, client, auth_a, league, fake_data_source):
+        seen = self._recording_factory(client, fake_data_source)
+
+        client.post(f"/leagues/{league.id}/sync", headers=auth_a)
+
+        assert seen == [None]
+
+    def test_an_unreadable_stored_cookie_is_a_clean_4xx(
+        self, client, db, auth_a, league, fernet_key
+    ):
+        """A rotated FERNET_KEY must read as "reconnect your league", not a 500.
+
+        crypto.decrypt raises InvalidToken for a token written under another key
+        and for a tampered one alike — deliberately indistinguishable — and
+        leaves the HTTP response to this layer.
+        """
+        league.espn_s2_encrypted = encrypt(COOKIE)
+        db.commit()
+
+        # Rotate the key out from under the stored token.
+        from warroom import crypto
+        from warroom.config import get_settings
+
+        crypto._fernet.cache_clear()
+        get_settings().fernet_key = Fernet.generate_key().decode()
+
+        r = client.post(f"/leagues/{league.id}/sync", headers=auth_a)
+
+        assert r.status_code == 422
+        assert "reconnect" in r.json()["detail"].lower()
 
 
 class TestList:

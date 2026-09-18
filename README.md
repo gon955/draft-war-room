@@ -13,7 +13,13 @@ Build spec: [`Draft_War_Room_SPEC.md`](Draft_War_Room_SPEC.md).
 |------|-------|
 | Valuation engine (VOR) | shipped, unit-tested |
 | ESPN adapter | shipped, contract-tested without the network |
-| Schema, migrations, API, auth | scaffolded, not implemented |
+| Schema + migrations | all 10 tables, Alembic, no model drift |
+| Auth (register / login / JWT) | done |
+| Ownership + share authorization | done, full SPEC 6 matrix tested |
+| Leagues, boards, rankings, shares | done |
+| Tiers | done |
+| Players, valuations, auto-tiering | done — 30 of 33 endpoints |
+| Mock drafts + best-available | not implemented |
 | Frontend | not started |
 
 ## Layout

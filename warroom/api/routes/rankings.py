@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 
 from warroom.authz import require_board_access, require_edit_access
 from warroom.deps import CurrentUser, DbSession
-from warroom.models import Player, Ranking
+from warroom.models import Player, Ranking, Tier
 from warroom.schemas.ranking import RankingCreate, RankingOut, RankingPatch, ReorderIn
 
 router = APIRouter(tags=["rankings"])
@@ -39,6 +39,30 @@ def _ranking_for_edit(db: DbSession, ranking_id: uuid.UUID, user: CurrentUser) -
 
     require_edit_access(db, ranking.board_id, user)
     return ranking
+
+
+def _require_tier_on_board(db: DbSession, board_id: uuid.UUID, tier_id: uuid.UUID | None) -> None:
+    """A ranking may only carry a tier from its own board.
+
+    The composite FK on (tier_id, board_id) makes this a database invariant, so
+    this check is about the RESPONSE, not the integrity: without it the write
+    reaches Postgres and comes back as an IntegrityError, which create_ranking
+    would report as "this player is already ranked on this board" — the wrong
+    error, blaming the wrong field.
+
+    One message covers both "no such tier" and "tier on another board". Telling
+    them apart would confirm that a tier id belonging to someone else's board
+    exists, which is the same leak the 404-not-403 rule exists to prevent.
+    """
+    if tier_id is None:
+        return
+
+    tier = db.get(Tier, tier_id)
+    if tier is None or tier.board_id != board_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="No such tier on this board.",
+        )
 
 
 @router.get("/boards/{board_id}/rankings", response_model=list[RankingOut])
@@ -63,12 +87,27 @@ def list_rankings(board_id: uuid.UUID, db: DbSession, user: CurrentUser) -> list
 def create_ranking(
     board_id: uuid.UUID, payload: RankingCreate, db: DbSession, user: CurrentUser
 ) -> Ranking:
-    require_edit_access(db, board_id, user)
+    board = require_edit_access(db, board_id, user)
 
-    if db.get(Player, payload.player_id) is None:
+    player = db.get(Player, payload.player_id)
+    if player is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No such player."
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="No such player."
         )
+
+    # players is season-scoped shared reference data, and nothing in the schema
+    # ties a ranking's player to its board's season — the FK only says the
+    # player row exists. Rank a player from another season and they join to no
+    # valuation (unique(league_id, player_id) is per league, and the league's
+    # pool is its own season), so they would surface on the board with no value
+    # and drift silently through best-available.
+    if player.season != board.league.season:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"That player is not in this league's season ({board.league.season}).",
+        )
+
+    _require_tier_on_board(db, board_id, payload.tier_id)
 
     ranking = Ranking(board_id=board_id, **payload.model_dump())
     db.add(ranking)
@@ -92,7 +131,11 @@ def patch_ranking(
 ) -> Ranking:
     ranking = _ranking_for_edit(db, ranking_id, user)
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    fields = payload.model_dump(exclude_unset=True)
+    if "tier_id" in fields:
+        _require_tier_on_board(db, ranking.board_id, fields["tier_id"])
+
+    for field, value in fields.items():
         setattr(ranking, field, value)
 
     db.commit()
@@ -126,7 +169,7 @@ def reorder_rankings(
     unknown = [item.player_id for item in payload.items if item.player_id not in existing]
     if unknown:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"{len(unknown)} player(s) are not ranked on this board; nothing was changed.",
         )
 

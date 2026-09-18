@@ -16,9 +16,9 @@ failure case asserts that every rank is untouched, not merely that it 4xx'd.
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from warroom.models import Ranking, Tier
+from warroom.models import Board, Player, Ranking, Tier
 
 
 def add(client, board, player, headers, **fields):
@@ -300,3 +300,129 @@ class TestTheWholeFlow:
         assert len(client.get(f"/boards/{board_id}/rankings", headers=auth_a).json()) == 2
 
         assert db.scalar(select(Ranking).where(Ranking.id == uuid.UUID(ids[1]))) is None
+
+
+class TestTierBelongsToItsBoard:
+    """A ranking's tier must come from that ranking's own board.
+
+    Enforced twice on purpose. The composite FK on (tier_id, board_id) is the
+    invariant — auto-tiering writes tier_id in bulk and never passes through
+    these routes — and the route checks exist so the API answers "no such tier
+    on this board" instead of letting Postgres raise an IntegrityError that
+    create_ranking would have reported as "already ranked on this board".
+    """
+
+    @staticmethod
+    def _other_board_tier(db, league, user):
+        """A tier on a DIFFERENT board, built on the same league."""
+        other = Board(user_id=user.id, league_id=league.id, name="Other strategy")
+        db.add(other)
+        db.commit()
+        tier = Tier(board_id=other.id, label="Elite", sort_order=1)
+        db.add(tier)
+        db.commit()
+        return tier
+
+    def test_create_with_a_tier_from_another_board_is_422(
+        self, client, db, auth_a, board, players, league, user_a
+    ):
+        tier = self._other_board_tier(db, league, user_a)
+
+        r = add(client, board, players[0], auth_a, tier_id=str(tier.id))
+
+        assert r.status_code == 422
+        assert r.json()["detail"] == "No such tier on this board."
+        assert db.scalar(select(func.count()).select_from(Ranking)) == 0
+
+    def test_create_with_a_tier_that_does_not_exist_is_422(self, client, auth_a, board, players):
+        # Same message as the cross-board case: telling them apart would confirm
+        # that another board's tier id exists.
+        r = add(client, board, players[0], auth_a, tier_id=str(uuid.uuid4()))
+
+        assert r.status_code == 422
+        assert r.json()["detail"] == "No such tier on this board."
+
+    def test_patch_with_a_tier_from_another_board_is_422(
+        self, client, db, auth_a, board, players, league, user_a
+    ):
+        rid = add(client, board, players[0], auth_a).json()["id"]
+        tier = self._other_board_tier(db, league, user_a)
+
+        r = client.patch(f"/rankings/{rid}", headers=auth_a, json={"tier_id": str(tier.id)})
+
+        assert r.status_code == 422
+        assert db.get(Ranking, uuid.UUID(rid)).tier_id is None
+
+    def test_this_board_s_own_tier_is_accepted(self, client, db, auth_a, board, players):
+        """The check must not be so eager it blocks the ordinary case."""
+        tier = Tier(board_id=board.id, label="Elite", sort_order=1)
+        db.add(tier)
+        db.commit()
+
+        r = add(client, board, players[0], auth_a, tier_id=str(tier.id))
+
+        assert r.status_code == 201
+        assert r.json()["tier_id"] == str(tier.id)
+
+    def test_clearing_a_tier_to_null_still_works(self, client, db, auth_a, board, players):
+        tier = Tier(board_id=board.id, label="Elite", sort_order=1)
+        db.add(tier)
+        db.commit()
+        rid = add(client, board, players[0], auth_a, tier_id=str(tier.id)).json()["id"]
+
+        r = client.patch(f"/rankings/{rid}", headers=auth_a, json={"tier_id": None})
+
+        assert r.status_code == 200
+        assert r.json()["tier_id"] is None
+
+    def test_deleting_a_tier_clears_it_and_keeps_the_ranking(
+        self, client, db, auth_a, board, players
+    ):
+        """ON DELETE SET NULL (tier_id) against a live database.
+
+        The column-scoped form is load-bearing: a bare SET NULL would try to
+        null board_id too, which is NOT NULL, and this delete would raise.
+        """
+        tier = Tier(board_id=board.id, label="Elite", sort_order=1)
+        db.add(tier)
+        db.commit()
+        rid = uuid.UUID(add(client, board, players[0], auth_a, tier_id=str(tier.id)).json()["id"])
+
+        db.delete(tier)
+        db.commit()
+        db.expire_all()
+
+        ranking = db.get(Ranking, rid)
+        assert ranking is not None
+        assert ranking.tier_id is None
+        assert ranking.board_id == board.id
+
+
+class TestPlayerMustBeInTheLeagueSeason:
+    """players is season-scoped shared reference data and the FK only says the
+    row exists, so nothing but this check ties a ranking to its league's season.
+    A player from another season joins to no valuation and would show up on the
+    board with no value at all."""
+
+    def test_a_player_from_another_season_is_422(self, client, db, auth_a, board, league):
+        stale = Player(
+            espn_player_id=99999,
+            season=league.season - 1,
+            name="Last Year",
+            pro_team="LAL",
+            positions=["PG"],
+            projections={"pts": 1.0},
+        )
+        db.add(stale)
+        db.commit()
+
+        r = client.post(
+            f"/boards/{board.id}/rankings", headers=auth_a, json={"player_id": str(stale.id)}
+        )
+
+        assert r.status_code == 422
+        assert str(league.season) in r.json()["detail"]
+        assert db.scalar(select(func.count()).select_from(Ranking)) == 0
+
+    def test_a_player_in_the_league_season_is_accepted(self, client, auth_a, board, players):
+        assert add(client, board, players[0], auth_a).status_code == 201

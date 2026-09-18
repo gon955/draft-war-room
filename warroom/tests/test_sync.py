@@ -22,16 +22,16 @@ from sqlalchemy import func, select
 
 from warroom.models import League, Player, ScoringFormat
 from warroom.tests.conftest import SEASON
-from warroom.valuation.data_source import FakePlayerDataSource
+from warroom.valuation.data_source import FakePlayerDataSource, fixed_source_factory
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 
 
 def point_source(client, settings, players):
     """Repoint the app at a source returning exactly these fixtures."""
-    from warroom.deps import get_data_source
+    from warroom.deps import get_data_source_factory
 
-    client.app.dependency_overrides[get_data_source] = lambda: FakePlayerDataSource(
-        settings=settings, players=players
+    client.app.dependency_overrides[get_data_source_factory] = lambda: fixed_source_factory(
+        FakePlayerDataSource(settings=settings, players=players)
     )
 
 

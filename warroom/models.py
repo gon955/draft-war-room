@@ -30,9 +30,18 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import UUID, Enum, ForeignKey, Index, UniqueConstraint, func, text
+from sqlalchemy import (
+    UUID,
+    Enum,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 
 from warroom.db import Base
 
@@ -181,7 +190,14 @@ class Valuation(Base, TimestampMixin):
     """The analytical engine's output cache."""
 
     __tablename__ = "valuations"
-    __table_args__ = (UniqueConstraint("league_id", "player_id"),)
+    __table_args__ = (
+        UniqueConstraint("league_id", "player_id"),
+        # GET /leagues/{id}/valuations reads one league's rows best-first and
+        # pages through them, which is an index-only walk with this and a sort
+        # of the whole league without it. DESC matches the query's direction so
+        # Postgres reads it forward rather than backward.
+        Index("ix_valuations_league_id_value", "league_id", text("value DESC")),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     league_id: Mapped[uuid.UUID] = mapped_column(
@@ -196,7 +212,15 @@ class Valuation(Base, TimestampMixin):
     replacement_points: Mapped[float] = mapped_column(nullable=False)
     value: Mapped[float] = mapped_column(nullable=False)
     assigned_slot: Mapped[str] = mapped_column(nullable=False)
-    computed_at: Mapped[datetime] = mapped_column(server_default=func.now(), nullable=False)
+    # clock_timestamp(), for the same reason TimestampMixin uses it: now() is
+    # transaction_timestamp(), so a recompute inside one transaction would write
+    # back the moment the transaction opened. The upsert in services.valuation
+    # must also name this column in its ON CONFLICT set_ — a Core upsert does
+    # not re-apply a server default on update, so leaving it out would pin every
+    # row at its first-ever compute time and make a fresh cache look stale.
+    computed_at: Mapped[datetime] = mapped_column(
+        server_default=func.clock_timestamp(), nullable=False
+    )
 
     # Graph Traversal Anchors
     league: Mapped["League"] = relationship(back_populates="valuations")
@@ -238,6 +262,13 @@ class Board(Base, TimestampMixin):
 
 class Tier(Base):
     __tablename__ = "tiers"
+    __table_args__ = (
+        # Redundant against the PK on its own, and load-bearing anyway: it is
+        # what rankings' composite FK below references, which is what makes
+        # "a ranking's tier belongs to the same board" a database invariant
+        # rather than a rule every writer has to remember.
+        UniqueConstraint("id", "board_id"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     board_id: Mapped[uuid.UUID] = mapped_column(
@@ -251,7 +282,14 @@ class Tier(Base):
 
     # Graph Traversal Anchors
     board: Mapped["Board"] = relationship(back_populates="tiers")
-    rankings: Mapped[list["Ranking"]] = relationship(back_populates="tier")
+    # Joined on tier_id only. board_id is part of the composite FK into this
+    # table, so an inferred join would also copy tiers.board_id into
+    # rankings.board_id and collide with Board.rankings over who owns that
+    # column. The composite constraint stays where it belongs — in the DDL.
+    rankings: Mapped[list["Ranking"]] = relationship(
+        back_populates="tier",
+        primaryjoin=lambda: Tier.id == foreign(Ranking.tier_id),
+    )
 
 
 class Ranking(Base, TimestampMixin):
@@ -261,6 +299,22 @@ class Ranking(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("board_id", "player_id"),
         Index("ix_rankings_board_id_user_rank", "board_id", "user_rank"),
+        # A tier from ANOTHER board must not be attachable to this ranking. The
+        # single-column FK this replaces only checked that the tier existed, so
+        # the tier/board mismatch was reachable through the API and would have
+        # silently broken every "group this board by tier" read.
+        #
+        # SET NULL (tier_id) — the column list is Postgres 15+ and is the whole
+        # reason this works: an unqualified ON DELETE SET NULL would null every
+        # referencing column, board_id included, and board_id is NOT NULL, so
+        # deleting a tier would error instead of clearing the tier off its
+        # rankings.
+        ForeignKeyConstraint(
+            ["tier_id", "board_id"],
+            ["tiers.id", "tiers.board_id"],
+            ondelete="SET NULL (tier_id)",
+            name="fk_rankings_tier_id_board_id_tiers",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -270,9 +324,8 @@ class Ranking(Base, TimestampMixin):
     player_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("players.id", ondelete="RESTRICT"), nullable=False
     )
-    tier_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("tiers.id", ondelete="SET NULL"), nullable=True
-    )
+    # FK declared at table level (composite, with board_id) — see __table_args__.
+    tier_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # Nullable indicates no manual override has occurred
     user_rank: Mapped[int | None] = mapped_column(nullable=True)
@@ -289,7 +342,10 @@ class Ranking(Base, TimestampMixin):
     # Graph Traversal Anchors
     board: Mapped["Board"] = relationship(back_populates="rankings")
     player: Mapped["Player"] = relationship(back_populates="rankings")
-    tier: Mapped["Tier | None"] = relationship(back_populates="rankings")
+    tier: Mapped["Tier | None"] = relationship(
+        back_populates="rankings",
+        primaryjoin=lambda: Tier.id == foreign(Ranking.tier_id),
+    )
 
 
 class MockDraft(Base, TimestampMixin):
