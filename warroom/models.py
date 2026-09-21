@@ -72,6 +72,20 @@ class SharePermission(enum.Enum):
     EDIT = "edit"
 
 
+class ReplacementBasis(enum.Enum):
+    """What this league's valuations measure a player against.
+
+    Mirrors valuation.engine.ReplacementBasis. Stored per league rather than
+    read from config because it changes what every cached number in
+    `valuations` MEANS — a board computed one way and read the other is
+    silently wrong, and there would be nothing in the row to say so.
+    """
+
+    STARTER = "starter"
+    WAIVER = "waiver"
+    MARGINAL = "marginal"
+
+
 class ScoringFormat(enum.Enum):
     POINTS = "points"
     CATEGORIES = "categories"
@@ -144,6 +158,18 @@ class League(Base, TimestampMixin):
     num_teams: Mapped[int] = mapped_column(nullable=False)
     roster_size: Mapped[int] = mapped_column(nullable=False)
     espn_s2_encrypted: Mapped[str | None] = mapped_column(nullable=True)
+    # Defaults to STARTER so an existing league's numbers do not move until
+    # somebody asks them to; server_default so the migration can backfill.
+    replacement_basis: Mapped[ReplacementBasis] = mapped_column(
+        Enum(
+            ReplacementBasis,
+            name="replacement_basis",
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+        default=ReplacementBasis.STARTER,
+        server_default="starter",
+    )
 
     # PostgreSQL JSONB Fields (Via db.Base.type_annotation_map)
     roster_slots: Mapped[dict[str, Any]] = mapped_column(nullable=False)
@@ -212,6 +238,15 @@ class Valuation(Base, TimestampMixin):
     replacement_points: Mapped[float] = mapped_column(nullable=False)
     value: Mapped[float] = mapped_column(nullable=False)
     assigned_slot: Mapped[str] = mapped_column(nullable=False)
+    # One standard deviation on this number, in points. Stored beside the
+    # value rather than derived on read because it depends on the stat
+    # coverage of the run that produced it — a later recompute with better
+    # ESPN data would give a different band for the same value, and the row
+    # has to say which one it came with.
+    value_sd: Mapped[float] = mapped_column(nullable=False, server_default="0")
+    # The share of that band contributed by THIS app's estimators rather
+    # than by ESPN. The part that does not cancel when comparing players.
+    model_sd: Mapped[float] = mapped_column(nullable=False, server_default="0")
     # clock_timestamp(), for the same reason TimestampMixin uses it: now() is
     # transaction_timestamp(), so a recompute inside one transaction would write
     # back the moment the transaction opened. The upsert in services.valuation

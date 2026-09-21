@@ -18,9 +18,15 @@ Build spec: [`Draft_War_Room_SPEC.md`](Draft_War_Room_SPEC.md).
 | Ownership + share authorization | done, full SPEC 6 matrix tested |
 | Leagues, boards, rankings, shares | done |
 | Tiers | done |
-| Players, valuations, auto-tiering | done — 30 of 33 endpoints |
-| Mock drafts + best-available | not implemented |
-| Frontend | not started |
+| Players, valuations, auto-tiering | done |
+| Mock drafts + best-available | done — SPEC §4 complete |
+| Draft-aware recommendation | live replacement level shipped; roster fit and survival next |
+| Frontend | all four SPEC §8 screens built — Next.js 16 static export |
+
+The API is 35 endpoints: all 32 in SPEC §4, plus three additions the spec
+implies but does not enumerate — `POST /boards/{id}/tiers/auto` (auto-tiering,
+SPEC §5.4), `GET /mocks/{id}/picks` (§4 records picks but never reads the board
+back) and `GET /mocks/{id}/recommendation` (below).
 
 ## Layout
 
@@ -40,7 +46,7 @@ warroom/
   valuation/       the engine — pure, framework-free, no I/O
   tests/           app-level integration tests (SPEC §6)
 alembic/           migrations
-frontend/          Next.js (not scaffolded yet)
+frontend/          Next.js 16 App Router; static export, types from OpenAPI
 ```
 
 Two seams do most of the architectural work:

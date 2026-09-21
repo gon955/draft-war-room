@@ -530,3 +530,153 @@ class TestListValuations:
 
         assert body["total"] == len(players)
         assert all(v["league_id"] == str(league.id) for v in body["items"])
+
+
+class TestReplacementBasis:
+    """Choosing what a value is measured against (engine.ReplacementBasis)."""
+
+    def test_a_league_starts_on_the_starter_basis(self, client, auth_a, league):
+        body = client.get(f"/leagues/{league.id}", headers=auth_a).json()
+        assert body["replacement_basis"] == "starter"
+
+    def test_compute_echoes_the_basis_it_used(self, client, auth_a, league, players):
+        body = client.post(
+            f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={}
+        ).json()
+        assert body["replacement_basis"] == "starter"
+
+    def test_choosing_a_basis_persists_it_on_the_league(self, client, db, auth_a, league, players):
+        """Persisted, not per-call: it changes what every cached row MEANS, so
+        a valuations table that cannot say which question it answers would be
+        worse than no cache at all."""
+        body = client.post(
+            f"/leagues/{league.id}/valuations/compute",
+            headers=auth_a,
+            json={"replacement_basis": "waiver"},
+        ).json()
+        assert body["replacement_basis"] == "waiver"
+
+        db.expire_all()
+        assert (
+            client.get(f"/leagues/{league.id}", headers=auth_a).json()["replacement_basis"]
+            == "waiver"
+        )
+        # And a later recompute with no body keeps it rather than reverting.
+        again = client.post(
+            f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={}
+        ).json()
+        assert again["replacement_basis"] == "waiver"
+
+    def test_the_waiver_basis_raises_every_value(self, client, auth_a, league, players):
+        """The marginal starter is rostered by somebody; the waiver player is
+        not, and is worse — so measuring against him lifts every value."""
+        client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={})
+        starter = {
+            v["player_id"]: v["value"]
+            for v in client.get(
+                f"/leagues/{league.id}/valuations?limit=200", headers=auth_a
+            ).json()["items"]
+        }
+
+        client.post(
+            f"/leagues/{league.id}/valuations/compute",
+            headers=auth_a,
+            json={"replacement_basis": "waiver"},
+        )
+        waiver = {
+            v["player_id"]: v["value"]
+            for v in client.get(
+                f"/leagues/{league.id}/valuations?limit=200", headers=auth_a
+            ).json()["items"]
+        }
+
+        assert waiver.keys() == starter.keys()
+        assert all(waiver[k] >= starter[k] for k in starter)
+        assert any(waiver[k] > starter[k] for k in starter)
+
+    def test_an_unknown_basis_is_422(self, client, auth_a, league, players):
+        r = client.post(
+            f"/leagues/{league.id}/valuations/compute",
+            headers=auth_a,
+            json={"replacement_basis": "vibes"},
+        )
+        assert r.status_code == 422
+
+
+class TestUncertaintyBand:
+    """The error bar shipped alongside each value."""
+
+    def test_compute_writes_a_band(self, client, db, auth_a, league, players):
+        client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={})
+        rows = db.scalars(select(Valuation).where(Valuation.league_id == league.id)).all()
+        assert rows
+        assert all(r.value_sd > 0 for r in rows)
+
+    def test_the_band_scales_with_the_projection(self, client, auth_a, league, players):
+        client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={})
+        items = client.get(f"/leagues/{league.id}/valuations?limit=200", headers=auth_a).json()[
+            "items"
+        ]
+        best = max(items, key=lambda v: v["projected_points"])
+        worst = min(items, key=lambda v: v["projected_points"])
+        assert best["value_sd"] > worst["value_sd"]
+
+    def test_a_recompute_refreshes_the_band(self, client, db, auth_a, league, players):
+        """The upsert must name value_sd in its set_, or a recomputed row keeps
+        the 0 the migration backfilled and the band reads as certainty."""
+        client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={})
+        db.expire_all()
+        for row in db.scalars(select(Valuation).where(Valuation.league_id == league.id)):
+            row.value_sd = 0.0
+            row.model_sd = 0.0
+        db.commit()
+
+        client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={})
+        db.expire_all()
+        rows = db.scalars(select(Valuation).where(Valuation.league_id == league.id)).all()
+        assert all(r.value_sd > 0 for r in rows)
+
+    def test_a_pool_with_no_estimated_stats_has_no_model_component(
+        self, client, db, auth_a, league, players
+    ):
+        """The fixture league scores only `pts`, which ESPN projects directly,
+        so nothing here rests on a model of ours."""
+        client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a, json={})
+        rows = db.scalars(select(Valuation).where(Valuation.league_id == league.id)).all()
+        assert all(r.model_sd == 0.0 for r in rows)
+        assert all(r.value_sd > 0 for r in rows)
+
+    def test_the_marginal_basis_is_selectable_end_to_end(self, client, db, auth_a, league, players):
+        body = client.post(
+            f"/leagues/{league.id}/valuations/compute",
+            headers=auth_a,
+            json={"replacement_basis": "marginal"},
+        ).json()
+        assert body["replacement_basis"] == "marginal"
+        assert body["players_valued"] == len(players)
+
+        rows = db.scalars(select(Valuation).where(Valuation.league_id == league.id)).all()
+        # Six chairs in the fixture league (2 teams x PG/C/UTIL); everyone
+        # else is BENCH. Nobody is credited at a chair that does not exist.
+        starters = [r for r in rows if r.assigned_slot != "BENCH"]
+        assert len(starters) == 6
+
+    def test_the_live_board_uses_the_league_basis_too(self, client, auth_a, league, board, players):
+        """A board that redefines value the moment you start drafting is not
+        one you can practise against, so the mock screen has to answer the
+        same question the cached valuations do."""
+        client.post(
+            f"/leagues/{league.id}/valuations/compute",
+            headers=auth_a,
+            json={"replacement_basis": "marginal"},
+        )
+        mock_id = client.post(
+            f"/boards/{board.id}/mocks",
+            headers=auth_a,
+            json={"name": "m", "my_draft_slot": 1},
+        ).json()["id"]
+
+        items = client.get(f"/mocks/{mock_id}/recommendation", headers=auth_a).json()["items"]
+        assert items
+        seated = [i for i in items if i["live"]["assigned_slot"] != "BENCH"]
+        assert 0 < len(seated) <= 6

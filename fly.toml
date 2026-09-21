@@ -1,0 +1,58 @@
+# Fly.io deploy config. The Dockerfile is the portable part; this file is the
+# only host-specific piece, and Railway/Render equivalents are in the README
+# section below it.
+
+app = "warroom-api"
+
+# MUST match the region your Postgres lives in. The API makes up to 4 sequential
+# round trips per request (POST /mocks/{id}/picks is the worst), so every
+# millisecond of distance is paid several times over on every call.
+primary_region = "iad"
+
+[build]
+  # Nothing here: Fly builds ./Dockerfile by default.
+
+[env]
+  # Fly does not inject PORT, so the Dockerfile's ${PORT:-8000} default would
+  # apply. Setting it explicitly keeps this file and internal_port in one place.
+  PORT = "8080"
+
+[deploy]
+  # Runs `alembic upgrade head` in a ONE-OFF machine from the new image, and
+  # only promotes the release if it exits 0. This is why migrations do not live
+  # in CMD: with three replicas booting at once, three Alembic processes would
+  # race for the same version row.
+  release_command = "alembic upgrade head"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # Scale to zero between drafts. The trade is a cold start on the first request
+  # after idle — set min_machines_running = 1 on draft day, when a few seconds
+  # of wake-up while the clock runs is the wrong kind of surprise.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 40
+    hard_limit = 80
+
+  [[http_service.checks]]
+    # /health is the one route that touches neither auth nor the database, so a
+    # failing check means the process is down rather than Postgres being slow.
+    path = "/health"
+    method = "GET"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  # 512 MB, not 256: argon2id is configured at m=65536, so EVERY login or
+  # registration allocates 64 MB by design. Two concurrent logins on a 256 MB
+  # machine plus the interpreter is an OOM kill that looks like a random 502.
+  memory = "512mb"

@@ -26,15 +26,18 @@ from warroom.authz import require_league_access, require_league_owner
 from warroom.deps import CurrentUser, DbSession
 from warroom.models import Player, Valuation
 from warroom.schemas.player import (
+    ComputeIn,
     ComputeResult,
     Page,
     PlayerOut,
     PlayerSort,
     PlayerWithValuationOut,
     Position,
+    StatCoverageOut,
     ValuationOut,
 )
 from warroom.services import valuation as valuation_service
+from warroom.valuation.stats import untrustworthy_share
 
 router = APIRouter(prefix="/leagues", tags=["players", "valuations"])
 
@@ -109,7 +112,9 @@ def list_players(
 
 
 @router.post("/{league_id}/valuations/compute", response_model=ComputeResult)
-def compute_valuations(league_id: uuid.UUID, db: DbSession, user: CurrentUser) -> ComputeResult:
+def compute_valuations(
+    league_id: uuid.UUID, db: DbSession, user: CurrentUser, payload: ComputeIn | None = None
+) -> ComputeResult:
     """Run the engine over the cached pool and persist the results.
 
     Owner only (SPEC 4): it overwrites reference data every share-holder reads.
@@ -118,8 +123,13 @@ def compute_valuations(league_id: uuid.UUID, db: DbSession, user: CurrentUser) -
     """
     league = require_league_owner(db, league_id, user)
 
+    # Persisted before the engine runs, so the rows this writes and the column
+    # describing them land in the same transaction.
+    if payload is not None and payload.replacement_basis is not None:
+        league.replacement_basis = payload.replacement_basis
+
     try:
-        valued = valuation_service.compute_valuations(db, league)
+        valued, coverage = valuation_service.compute_valuations(db, league)
         db.commit()
     except (valuation_service.NotAPointsLeague, valuation_service.EmptyPlayerPool) as exc:
         db.rollback()
@@ -129,7 +139,22 @@ def compute_valuations(league_id: uuid.UUID, db: DbSession, user: CurrentUser) -
 
     # Not the rows' own computed_at: reading that back costs another query, and
     # this is the same "what the write did" shape as league.SyncResult.
-    return ComputeResult(players_valued=valued, computed_at=datetime.now(UTC))
+    return ComputeResult(
+        players_valued=valued,
+        computed_at=datetime.now(UTC),
+        replacement_basis=league.replacement_basis,
+        coverage=[
+            StatCoverageOut(
+                stat=c.stat,
+                weight=c.weight,
+                provenance=c.provenance.value,
+                detail=c.detail,
+                point_share=c.point_share,
+            )
+            for c in coverage
+        ],
+        estimated_share=untrustworthy_share(coverage),
+    )
 
 
 @router.get("/{league_id}/valuations", response_model=Page[ValuationOut])

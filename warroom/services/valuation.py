@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 
 from warroom.models import League, Player, ScoringFormat, Valuation
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
-from warroom.valuation.engine import value_over_replacement
+from warroom.valuation.engine import ReplacementBasis, value_over_replacement
+from warroom.valuation.stats import StatCoverage, pool_uncertainty, resolve_pool
 
 
 class NotAPointsLeague(ValueError):
@@ -66,6 +67,7 @@ def settings_for(league: League) -> LeagueSettings:
         roster_slots=league.roster_slots,
         point_weights=league.point_weights,
         roster_size=league.roster_size,
+        replacement_basis=league.replacement_basis.value,
     )
 
 
@@ -84,7 +86,7 @@ def to_projection(player: Player) -> PlayerProjection:
     )
 
 
-def compute_valuations(db: Session, league: League) -> int:
+def compute_valuations(db: Session, league: League) -> tuple[int, list[StatCoverage]]:
     """Value the league's whole cached pool and upsert the results.
 
     Nothing here commits. The caller owns the transaction boundary, same as
@@ -109,7 +111,20 @@ def compute_valuations(db: Session, league: League) -> int:
     # season) plus the season filter above is what makes this dict total.
     row_id_by_espn_id = {p.espn_player_id: p.id for p in pool}
 
-    results = value_over_replacement([to_projection(p) for p in pool], settings_for(league))
+    settings = settings_for(league)
+
+    # Reconcile ESPN's projected stat vocabulary with the league's scored one
+    # BEFORE the engine sees it. Skipping this is not neutral: project_points
+    # defaults an unmatched stat to 0.0, so a league scoring oreb/dreb against
+    # projections that only carry `reb` values rebounding at nothing at all —
+    # silently, and wrongly, for every player.
+    projections, coverage = resolve_pool([to_projection(p) for p in pool], settings.point_weights)
+    # The band comes from the SAME coverage report the engine was fed, so a
+    # value and its uncertainty can never describe different runs.
+    bands = pool_uncertainty(projections, settings.point_weights, coverage)
+    results = value_over_replacement(
+        projections, settings, basis=ReplacementBasis(settings.replacement_basis)
+    )
 
     rows = [
         {
@@ -119,6 +134,8 @@ def compute_valuations(db: Session, league: League) -> int:
             "replacement_points": result.replacement_points,
             "value": result.value,
             "assigned_slot": result.assigned_slot,
+            "value_sd": bands[result.player.espn_player_id].points_sd,
+            "model_sd": bands[result.player.espn_player_id].model_points_sd,
         }
         for result in results
     ]
@@ -131,6 +148,12 @@ def compute_valuations(db: Session, league: League) -> int:
             "replacement_points": stmt.excluded.replacement_points,
             "value": stmt.excluded.value,
             "assigned_slot": stmt.excluded.assigned_slot,
+            # Named for the same reason as computed_at below: a Core
+            # upsert applies no server default on UPDATE, so leaving
+            # these out would pin every recomputed row at the 0 the
+            # migration backfilled and the band would read as certainty.
+            "value_sd": stmt.excluded.value_sd,
+            "model_sd": stmt.excluded.model_sd,
             # Both, explicitly. A Core upsert re-applies no server default on
             # the UPDATE path, so omitting these pins every row at its
             # first-ever compute and a freshly recomputed cache reads as
@@ -155,4 +178,4 @@ def compute_valuations(db: Session, league: League) -> int:
         )
     )
 
-    return len(rows)
+    return len(rows), coverage

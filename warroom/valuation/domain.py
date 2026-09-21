@@ -46,6 +46,10 @@ class LeagueSettings:
     point_weights: dict[str, float] = field(default_factory=dict)
     categories: tuple[str, ...] | None = None
     roster_size: int = 0
+    # What a value is measured against; see engine.ReplacementBasis. A
+    # plain string so this module stays free of the engine's imports, the
+    # same reason scoring_format is one.
+    replacement_basis: str = "starter"
 
 
 @dataclass(frozen=True)

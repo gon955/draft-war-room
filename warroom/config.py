@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     espn_s2: str | None = None
     espn_swid: str | None = None
     jwt_secret: str
+    # Comma-separated. Both spellings of localhost on purpose: a browser treats
+    # http://localhost:3000 and http://127.0.0.1:3000 as DIFFERENT origins, and
+    # allowing one while browsing the other fails with a CORS error that never
+    # says which.
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Cloudflare Pages gives every branch and commit its own preview host
+    # (<hash>.<project>.pages.dev), which an exact allowlist can never match.
+    # Leave unset to allow production only.
+    cors_origin_regex: str | None = None
 
 
 @lru_cache

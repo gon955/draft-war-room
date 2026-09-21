@@ -11,6 +11,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict
 
+from warroom.models import ReplacementBasis
+
 
 class Position(str, Enum):
     """The five real positions — the only values a SQL filter can match.
@@ -71,6 +73,12 @@ class ValuationOut(BaseModel):
     replacement_points: float
     value: float
     assigned_slot: str
+    # One standard deviation on `value`, in points, and the share of it
+    # coming from this app's own estimators rather than ESPN. Read the
+    # second one when comparing two players: the first is largely common
+    # to the whole pool and cancels, the second does not.
+    value_sd: float
+    model_sd: float
     computed_at: datetime
 
 
@@ -90,8 +98,43 @@ class PlayerWithValuationOut(BaseModel):
     valuation: ValuationOut | None
 
 
+class StatCoverageOut(BaseModel):
+    """How one scored stat was obtained, and how much of the scoring it carries."""
+
+    stat: str
+    weight: float
+    provenance: str
+    detail: str
+    point_share: float
+
+
+class ComputeIn(BaseModel):
+    """Optional knobs for a recompute. `{}` reuses the league's own settings.
+
+    Setting `replacement_basis` PERSISTS it on the league rather than applying
+    it for one call. That is deliberate: it changes what every row in
+    `valuations` means, and a cache whose rows cannot say which question they
+    answer is worse than no cache.
+    """
+
+    replacement_basis: ReplacementBasis | None = None
+
+
 class ComputeResult(BaseModel):
-    """What the write did, not what it wrote — same shape as league.SyncResult."""
+    """What the write did, not what it wrote — same shape as league.SyncResult.
+
+    `coverage` and `estimated_share` are the honesty of the number. ESPN projects
+    only 31 of its 46 scoreable stat codes, so a league can score things that are
+    never projected; without this the valuation would look equally confident
+    whether every stat was real or a third of the scoring was invented.
+    """
 
     players_valued: int
     computed_at: datetime
+    # What these numbers are measured against, echoed so a client never
+    # has to assume which basis produced them.
+    replacement_basis: ReplacementBasis
+    coverage: list[StatCoverageOut]
+    # Fraction of scoring that is estimated or missing. Read this before the
+    # rankings: a large number means the board is a model, not a measurement.
+    estimated_share: float

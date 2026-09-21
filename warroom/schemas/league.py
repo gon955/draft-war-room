@@ -9,7 +9,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from warroom.models import ScoringFormat
+from warroom.models import ReplacementBasis, ScoringFormat
 
 
 class LeagueCreate(BaseModel):
@@ -32,6 +32,7 @@ class LeagueOut(BaseModel):
     roster_size: int
     roster_slots: dict[str, int]
     point_weights: dict[str, float]
+    replacement_basis: ReplacementBasis
     created_at: datetime
 
 

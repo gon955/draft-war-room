@@ -1,0 +1,130 @@
+:root {
+  --bg: #0f1117;
+  --panel: #171a23;
+  --line: #262b38;
+  --ink: #e6e9f0;
+  --dim: #8b93a7;
+  --acc: #6ea8fe;
+  --ok: #4ec9a5;
+  --bad: #e86a6a;
+  --mine: #3a3050;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-size: 14px;
+}
+
+a { color: var(--acc); }
+
+/* Numbers in the board and draft tables must line up column-wise. */
+.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-geist-mono), monospace; }
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: 18px 16px 48px; }
+
+nav.top {
+  display: flex; gap: 16px; align-items: center;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+nav.top .brand { font-weight: 600; }
+nav.top .spacer { margin-left: auto; }
+nav.top a { text-decoration: none; color: var(--dim); }
+nav.top a:hover, nav.top a.on { color: var(--ink); }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
+.card > h2 {
+  margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  font-size: 12px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim);
+}
+.card > .body { padding: 12px 14px; }
+
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.row:last-child { margin-bottom: 0; }
+
+input, select, button, textarea {
+  font: inherit; color: var(--ink); background: #0c0e14;
+  border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px;
+}
+input[type="checkbox"] { padding: 0; width: 15px; height: 15px; }
+button { background: #232838; border-color: #333a4d; cursor: pointer; }
+button:hover:not(:disabled) { background: #2c3244; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--acc); border-color: var(--acc); color: #08101f; font-weight: 600; }
+button.danger { background: #3a2429; border-color: #5a343c; color: #f0b6b6; }
+label { color: var(--dim); font-size: 12px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--dim); font-weight: 500; padding: 5px 7px; border-bottom: 1px solid var(--line); }
+td { padding: 4px 7px; border-bottom: 1px solid #1d212b; }
+tr.mine td { background: var(--mine); }
+
+.scroll { max-height: 520px; overflow: auto; }
+.muted { color: var(--dim); font-size: 12px; }
+.error { color: var(--bad); font-size: 13px; margin: 6px 0 0; }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 3px; background: #232838; color: var(--dim); }
+.tag.t { background: #1e3a2e; color: var(--ok); }
+.tag.a { background: #3a2429; color: #f0b6b6; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* Player headshots. Fixed box so a slow or missing image never reflows the
+   table — the row height is the same before the CDN answers, after it answers,
+   and when it 404s into the initials fallback. */
+.shot {
+  border-radius: 50%;
+  object-fit: cover;
+  background: #232838;
+  vertical-align: middle;
+  flex: none;
+}
+.shot-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+/* Keeps the headshot and the name on one baseline without a table-layout hack. */
+.player-cell { display: flex; align-items: center; gap: 8px; }
+.player-cell .stack { min-width: 0; }
+
+/* Lineup seats. auto-fill rather than a fixed column count so the roster
+   reflows from three columns to one without a media query — a 13-man roster
+   has to read on a phone too. */
+.seats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+}
+.seat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  min-width: 0;
+}
+/* A dashed border reads as "this seat is still open" without a legend, and
+   keeps an unfilled slot the same height as a filled one so the grid holds. */
+.seat.empty { border-style: dashed; background: transparent; }
+.seat.bench { background: transparent; }
+.seat-slot {
+  flex: none;
+  min-width: 42px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  font-family: var(--font-geist-mono), monospace;
+}
+.seat-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seat .player-cell { min-width: 0; }

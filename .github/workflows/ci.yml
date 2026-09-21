@@ -7,6 +7,7 @@ on:
 
 jobs:
   test:
+    name: tests
     runs-on: ubuntu-latest
 
     services:
@@ -46,3 +47,109 @@ jobs:
           alembic upgrade head
 
       - run: pytest -v
+
+  # Independent of `tests`, and deliberately so: this job catches a different
+  # class of failure — a dependency that resolves on a laptop but not on
+  # linux/amd64, a file missing from a COPY, a CMD that does not start. Running
+  # it in parallel means a broken image is known in about a minute rather than
+  # after the whole suite.
+  docker:
+    name: image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Dockerfile installs from requirements.lock, but CI's test job
+      # installs from requirements.txt — so a dependency added to one and not
+      # the other produces an image missing it while everything stays green.
+      - name: requirements.lock covers requirements.txt
+        run: python3 scripts/check_lock.py
+
+      - name: Build
+        run: docker build -t warroom-api:ci .
+
+      - name: Image starts and serves /health
+        env:
+          # Deliberately unreachable. db.py builds its engine at import but
+          # connects lazily, so the app boots and answers /health with no
+          # database at all — which is why this job needs no Postgres service.
+          DATABASE_URL: postgresql+psycopg://unused:unused@127.0.0.1:5432/unused
+          JWT_SECRET: ci-smoke-test-secret-not-a-real-one
+        run: |
+          docker run -d --name api -p 8000:8000 \
+            -e DATABASE_URL -e JWT_SECRET warroom-api:ci
+
+          # `if` guards the curl: a bare `curl -sf` that fails would abort the
+          # whole step, because Actions runs these under `bash -e`.
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -sf -m 2 http://127.0.0.1:8000/health >/dev/null; then ready=1; break; fi
+            sleep 1
+          done
+
+          if [ -z "$ready" ]; then
+            echo "::error::the image never became healthy"
+            docker logs api
+            exit 1
+          fi
+
+          echo "health:   $(curl -s -m 2 http://127.0.0.1:8000/health)"
+
+          # The dev console must not ship. main.py only registers GET /dev when
+          # frontend/dev.html exists, and .dockerignore excludes it — so a 200
+          # here means the exclusion broke and a debug page is live in prod.
+          dev=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/dev)
+          echo "GET /dev: $dev (expected 404)"
+          test "$dev" = 404
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Runs HERE rather than in the frontend job because a running API is
+      # needed, and this job already has one — with no database, since
+      # /openapi.json is served from the app's own schema definitions.
+      - name: generated types match the live OpenAPI
+        working-directory: frontend
+        run: |
+          npm ci
+          npx openapi-typescript http://127.0.0.1:8000/openapi.json -o /tmp/types.generated.ts
+          # `diff`, not `git diff --exit-code`: the latter silently passes on a
+          # file git is not tracking, so it would be a no-op the moment someone
+          # regenerates types without committing them.
+          diff -u src/lib/types.ts /tmp/types.generated.ts
+
+  # Independent of both other jobs: typecheck, lint and build need no API and no
+  # database. tsc is the one that earns its place — with types generated from
+  # the OpenAPI document, a renamed Pydantic field becomes a compile error here
+  # instead of `undefined` on a page.
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Next 16 requires >= 20.9.0.
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npx tsc --noEmit
+
+      # `eslint`, not `next lint` — that command was removed in Next 16, and
+      # `next build` no longer lints on its own.
+      - run: npm run lint
+
+      # Writes out/ — the static export Cloudflare Pages serves.
+      - run: npm run build

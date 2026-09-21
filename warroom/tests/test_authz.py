@@ -8,6 +8,8 @@
   B with an EDIT share: DELETE the board     -> 403  (owner-only)
   B with a READ share: PATCH a tier          -> 403
   B with an EDIT share: compute valuations   -> 403  (league owner only)
+  B with a READ share: GET best-available    -> 200
+  B with a READ share: POST a mock pick      -> 403
   a non-owner POSTing to /boards/{id}/shares -> 404/403
 
 404-not-403 is the assertion that matters: 403 tells an attacker the board is
@@ -449,6 +451,110 @@ class TestAutotierAccessOverHttp:
     def test_a_board_id_that_does_not_exist_is_404(self, client, auth_a):
         response = client.post(f"/boards/{uuid.uuid4()}/tiers/auto", headers=auth_a, json={})
         assert response.status_code == 404
+
+
+class TestMockAccessOverHttp:
+    """Mock drafts (SPEC 4: board access to read, edit access to write).
+
+    The case that carries this class is a READ share reading best-available.
+    Sharing a board so someone can follow along on draft night is the whole
+    point of the feature, and a copy-pasted require_edit_access would break it
+    while every write-side test here still passed.
+    """
+
+    @staticmethod
+    def _mock_on_as_board(client, board, auth_a):
+        created = client.post(
+            f"/boards/{board.id}/mocks", json={"name": "Mock", "my_draft_slot": 1}, headers=auth_a
+        )
+        assert created.status_code == 201
+        return created.json()["id"]
+
+    def test_b_lists_as_mocks_with_no_share_is_404(self, client, board, auth_b, players):
+        assert client.get(f"/boards/{board.id}/mocks", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_create_a_mock(self, client, board, auth_b, players):
+        response = client.post(
+            f"/boards/{board.id}/mocks",
+            json={"name": "Mine now", "my_draft_slot": 1},
+            headers=auth_b,
+        )
+        assert response.status_code == 404
+
+    def test_stranger_cannot_read_the_draft_board(self, client, board, auth_a, auth_b, players):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/picks", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_read_best_available(self, client, board, auth_a, auth_b, players):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/best-available", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_set_a_pick(self, client, board, auth_a, auth_b, players):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        response = client.post(
+            f"/mocks/{mock_id}/picks",
+            json={"pick_number": 1, "player_id": str(players[0].id)},
+            headers=auth_b,
+        )
+        assert response.status_code == 404
+
+    def test_read_share_can_list_mocks(self, client, board, auth_b, players, read_share):
+        assert client.get(f"/boards/{board.id}/mocks", headers=auth_b).status_code == 200
+
+    def test_read_share_can_read_the_draft_board(
+        self, client, board, auth_a, auth_b, players, read_share
+    ):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/picks", headers=auth_b).status_code == 200
+
+    def test_read_share_can_read_best_available(
+        self, client, board, auth_a, auth_b, players, read_share
+    ):
+        # Following along on draft night is exactly what a read share is for.
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/best-available", headers=auth_b).status_code == 200
+
+    def test_read_share_cannot_create_a_mock(self, client, board, auth_b, players, read_share):
+        response = client.post(
+            f"/boards/{board.id}/mocks", json={"name": "Theirs", "my_draft_slot": 1}, headers=auth_b
+        )
+        assert response.status_code == 403
+
+    def test_read_share_cannot_set_a_pick(self, client, board, auth_a, auth_b, players, read_share):
+        # 403, not 404: B can already see this draft, so only the operation is
+        # too privileged — there is nothing left to conceal.
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        response = client.post(
+            f"/mocks/{mock_id}/picks",
+            json={"pick_number": 1, "player_id": str(players[0].id)},
+            headers=auth_b,
+        )
+        assert response.status_code == 403
+
+    def test_edit_share_can_create_a_mock(self, client, board, auth_b, players, edit_share):
+        response = client.post(
+            f"/boards/{board.id}/mocks", json={"name": "Ours", "my_draft_slot": 1}, headers=auth_b
+        )
+        assert response.status_code == 201
+
+    def test_edit_share_can_set_a_pick(self, client, board, auth_a, auth_b, players, edit_share):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        response = client.post(
+            f"/mocks/{mock_id}/picks",
+            json={"pick_number": 1, "player_id": str(players[0].id)},
+            headers=auth_b,
+        )
+        assert response.status_code == 200
+
+    def test_a_mock_id_that_does_not_exist_is_404(self, client, auth_a):
+        assert client.get(f"/mocks/{uuid.uuid4()}/picks", headers=auth_a).status_code == 404
 
 
 class TestShareManagementOverHttp:
