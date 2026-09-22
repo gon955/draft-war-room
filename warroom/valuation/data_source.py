@@ -45,6 +45,31 @@ class PlayerDataSource(Protocol):
     def get_player_pool(self, espn_league_id: int, season: int) -> list[PlayerProjection]: ...
 
 
+class PlayerDataSourceFactory(Protocol):
+    """Builds a data source for ONE league, given that league's ESPN cookie.
+
+    The credential is per league, not per process: a private league is read with
+    the cookie its owner supplied, which lives encrypted on the leagues row and
+    is decrypted at request time. A single long-lived data source cannot carry
+    that, so the app injects this and calls it per request.
+    """
+
+    def __call__(self, espn_s2: str | None = None) -> PlayerDataSource: ...
+
+
+def fixed_source_factory(source: PlayerDataSource) -> PlayerDataSourceFactory:
+    """A factory that ignores the cookie and always returns `source`.
+
+    What a test's dependency override hands back in place of the real,
+    credential-aware factory — so overriding still takes one line.
+    """
+
+    def factory(espn_s2: str | None = None) -> PlayerDataSource:
+        return source
+
+    return factory
+
+
 class FakePlayerDataSource:
     """In-memory data source for tests and local development."""
 

@@ -50,10 +50,27 @@ def unique_sets(name):
     }
 
 
-def ondelete(table_name, column):
-    """The ON DELETE rule on a column's foreign key."""
-    fk = next(fk for fk in table(table_name).foreign_keys if fk.parent.name == column)
-    return fk.ondelete
+def ondelete(table_name, column, references):
+    """The ON DELETE rule on the foreign key from `column` into `references`.
+
+    The referenced table is not optional, because a column can sit in more than
+    one foreign key and one here does: rankings.board_id is in both
+    fk_rankings_board_id_boards and the composite fk into tiers. Matching on the
+    column alone returned whichever came first in metadata order — which is how
+    this helper reported the tier rule as the board rule.
+
+    Matching more or less than exactly one key is an error rather than a pick,
+    so the next column to gain a second foreign key fails loudly here.
+    """
+    matches = [
+        fk
+        for fk in table(table_name).foreign_keys
+        if fk.parent.name == column and fk.column.table.name == references
+    ]
+    assert len(matches) == 1, (
+        f"{table_name}.{column} -> {references} matched {len(matches)} foreign keys, want 1"
+    )
+    return matches[0].ondelete
 
 
 def test_every_spec_table_exists():
@@ -110,24 +127,24 @@ class TestForeignKeyBehaviour:
     """Who takes what down. SPEC 0.2 and 3."""
 
     @pytest.mark.parametrize(
-        ("table_name", "column"),
+        ("table_name", "column", "references"),
         [
-            ("leagues", "user_id"),
-            ("boards", "user_id"),
-            ("boards", "league_id"),
-            ("tiers", "board_id"),
-            ("rankings", "board_id"),
-            ("mock_drafts", "board_id"),
-            ("mock_picks", "mock_draft_id"),
-            ("board_shares", "board_id"),
-            ("board_shares", "shared_with_user_id"),
-            ("valuations", "league_id"),
+            ("leagues", "user_id", "users"),
+            ("boards", "user_id", "users"),
+            ("boards", "league_id", "leagues"),
+            ("tiers", "board_id", "boards"),
+            ("rankings", "board_id", "boards"),
+            ("mock_drafts", "board_id", "boards"),
+            ("mock_picks", "mock_draft_id", "mock_drafts"),
+            ("board_shares", "board_id", "boards"),
+            ("board_shares", "shared_with_user_id", "users"),
+            ("valuations", "league_id", "leagues"),
         ],
     )
-    def test_owned_rows_cascade(self, table_name, column):
+    def test_owned_rows_cascade(self, table_name, column, references):
         # DELETE /boards/{id} must not fail on a foreign key the first time a
         # board has any content.
-        assert ondelete(table_name, column) == "CASCADE"
+        assert ondelete(table_name, column, references) == "CASCADE"
 
     @pytest.mark.parametrize("table_name", ["rankings", "mock_picks"])
     def test_user_data_blocks_player_deletion(self, table_name):
@@ -135,10 +152,35 @@ class TestForeignKeyBehaviour:
         # from ESPN. CASCADE here would let a routine resync delete every user's
         # rankings, notes and target flags for a dropped player — across every
         # board, including other people's. It must fail loudly instead.
-        assert ondelete(table_name, "player_id") == "RESTRICT"
+        assert ondelete(table_name, "player_id", "players") == "RESTRICT"
 
     def test_deleting_a_tier_keeps_its_rankings(self):
-        assert ondelete("rankings", "tier_id") == "SET NULL"
+        # "SET NULL (tier_id)", not a bare "SET NULL": the key is composite, and
+        # the unqualified form nulls every referencing column — board_id
+        # included, which is NOT NULL, so deleting a tier would raise instead of
+        # clearing that tier off its rankings. The behaviour this spells out is
+        # asserted against a live Postgres in
+        # test_rankings.py::TestTierBelongsToItsBoard.
+        assert ondelete("rankings", "tier_id", "tiers") == "SET NULL (tier_id)"
+
+    def test_a_ranking_tier_is_pinned_to_the_same_board(self):
+        # The composite FK is what makes "a ranking's tier belongs to that
+        # ranking's board" an invariant no writer can miss — the bulk tier_id
+        # writes auto-tiering will do never touch a route's validation.
+        composite = [
+            con
+            for con in table("rankings").constraints
+            if type(con).__name__ == "ForeignKeyConstraint"
+            and {c.name for c in con.columns} == {"tier_id", "board_id"}
+        ]
+        assert len(composite) == 1
+        assert [fk.column.name for fk in composite[0].elements] == ["id", "board_id"]
+        assert all(fk.column.table.name == "tiers" for fk in composite[0].elements)
+
+    def test_tiers_can_be_referenced_by_board(self):
+        # What the composite FK above references; without it Postgres refuses to
+        # create that key at all.
+        assert ("id", "board_id") in unique_sets("tiers")
 
     def test_cascading_relationships_let_postgres_do_the_work(self):
         # cascade="all, delete-orphan" without passive_deletes makes SQLAlchemy

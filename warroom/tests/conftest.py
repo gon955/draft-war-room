@@ -23,13 +23,12 @@ not because the default is wrong — SQLAlchemy 2.0 defaults to
 joins a Connection with an open transaction. Naming it keeps the behaviour from
 depending on a default, and says out loud why a route's commit is survivable.
 
-ESPN is ALWAYS faked: `get_data_source` is overridden with FakePlayerDataSource,
-so no test touches the network.
+ESPN is ALWAYS faked: `get_data_source_factory` is overridden with a factory
+over FakePlayerDataSource, so no test touches the network.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -40,11 +39,11 @@ from sqlalchemy.orm import Session
 
 from warroom.config import get_settings
 from warroom.db import Base, get_db
-from warroom.deps import get_data_source
+from warroom.deps import get_data_source_factory
 from warroom.main import create_app
 from warroom.models import Board, BoardShare, League, Player, ScoringFormat, SharePermission, User
 from warroom.security import create_access_token, hash_password
-from warroom.valuation.data_source import FakePlayerDataSource
+from warroom.valuation.data_source import FakePlayerDataSource, fixed_source_factory
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 
 # --------------------------------------------------------------------------- #
@@ -94,11 +93,11 @@ def _test_database_url() -> str:
     import. The suite therefore builds its own engine here and overrides
     get_db, leaving the app's (lazy, never-connected) engine unused.
     """
-    explicit = os.environ.get("TEST_DATABASE_URL")
-    if explicit:
-        return explicit
+    settings = get_settings()
+    if settings.test_database_url:
+        return settings.test_database_url
 
-    url = make_url(get_settings().database_url)
+    url = make_url(settings.database_url)
     if url.database and url.database.endswith("_test"):
         # CI already points DATABASE_URL at warroom_test.
         return url.render_as_string(hide_password=False)
@@ -233,7 +232,12 @@ def client(db: Session, fake_data_source: FakePlayerDataSource) -> Iterator[Test
     """
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[get_data_source] = lambda: fake_data_source
+    # The override returns a FACTORY, matching the real dependency: production
+    # builds a source around one league's decrypted cookie, and the fake ignores
+    # whatever cookie it is handed.
+    app.dependency_overrides[get_data_source_factory] = lambda: fixed_source_factory(
+        fake_data_source
+    )
 
     with TestClient(app) as test_client:
         yield test_client

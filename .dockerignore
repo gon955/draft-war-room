@@ -1,0 +1,46 @@
+# Everything the image does not need at runtime. This file is read before the
+# build context is sent to the daemon, so it decides both image size AND what
+# invalidates the layer cache — an unignored .git makes every commit a cache miss.
+
+.git
+.github
+.gitignore
+
+# Secrets. The single most important line here: .env holds DATABASE_URL,
+# JWT_SECRET, FERNET_KEY and live ESPN cookies. Baking it into a layer would
+# publish them to anyone who can pull the image, and `docker history` would
+# show them even after a later layer deleted the file.
+.env
+.env.*
+!.env.example
+
+# The suite does not ship. pytest and its fixtures are dev dependencies, the
+# test modules import them, and nothing in the running app imports the tests.
+warroom/tests/
+warroom/valuation/tests/
+.pytest_cache/
+.ruff_cache/
+
+# The dev console is deliberately absent in production: main.py only registers
+# GET /dev when frontend/dev.html exists, so excluding this directory removes
+# the route rather than merely hiding it.
+frontend/
+
+# Local scratch and dev-only scripts.
+scripts/
+espn_diag.py
+format_check.py
+roster_check.py
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Docs are not runtime artefacts.
+README.md
+Draft_War_Room_SPEC.md
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/

@@ -4,6 +4,7 @@ Every expected number here is computed by hand in the comments, so a failure
 points at a real logic change, not a mystery. No DB, no network.
 """
 
+import collections
 from typing import ClassVar
 
 import pytest
@@ -11,10 +12,14 @@ import pytest
 from warroom.valuation.data_source import FakePlayerDataSource
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 from warroom.valuation.engine import (
+    ReplacementBasis,
     compute_replacement_levels,
     default_slot_eligibility,
+    marginal_replacements,
+    optimal_seating,
     project_points,
     value_over_replacement,
+    waiver_replacement_levels,
 )
 
 
@@ -277,3 +282,202 @@ class TestRealLeagueRoster:
         assert all(v > 0 for v in repl.values())
         # PF/C:2 over 10 teams -> 20 starters -> the 20th best (index 19).
         assert repl["PF/C"] == points[19]
+
+
+# --------------------------------------------------------------------------- #
+# waiver_replacement_levels — the draft-time baseline
+# --------------------------------------------------------------------------- #
+class TestWaiverBasis:
+    """2 teams, PG:1/C:1/UTIL:1 starting, roster_size 2 -> 4 players drafted.
+
+    Pool of 6: guards 50/40/30, centres 45/20/10. Starter basis measures
+    against the LAST STARTER (2nd best eligible); waiver basis measures
+    against the best player left after 4 come off the board.
+    """
+
+    SETTINGS: ClassVar[LeagueSettings] = LeagueSettings(
+        scoring_format="points",
+        num_teams=2,
+        roster_slots={"PG": 1, "C": 1, "UTIL": 1},
+        point_weights={"pts": 1.0},
+        roster_size=2,
+    )
+    POOL: ClassVar[list] = [
+        P(1, ["PG"], 50), P(2, ["PG"], 40), P(3, ["PG"], 30),
+        P(4, ["C"], 45), P(5, ["C"], 20), P(6, ["C"], 10),
+    ]  # fmt: skip
+
+    @property
+    def points(self):
+        return {p.espn_player_id: p.stats["pts"] for p in self.POOL}
+
+    def test_the_waiver_baseline_sits_below_the_starter_baseline(self):
+        """The whole argument: the marginal STARTER is rostered by somebody,
+        so he is not what you fall back to. The best UNDRAFTED player is."""
+        starter = compute_replacement_levels(self.POOL, self.SETTINGS, self.points)
+        waiver = waiver_replacement_levels(self.POOL, self.SETTINGS, self.points)
+        assert all(waiver[s] <= starter[s] for s in starter)
+        assert any(waiver[s] < starter[s] for s in starter)
+
+    def test_it_measures_against_the_best_player_nobody_drafted(self):
+        # 2 teams x roster 2 = 4 drafted: by value that is p1, p4, p2, p5.
+        # Left over: p3 (PG 30) and p6 (C 10). So the best free guard is 30
+        # and the best free centre is 10, and UTIL takes the better of the two.
+        waiver = waiver_replacement_levels(self.POOL, self.SETTINGS, self.points)
+        assert waiver == {"PG": 30.0, "C": 10.0, "UTIL": 30.0}
+
+    def test_values_rise_by_the_drop_in_the_baseline(self):
+        starter = value_over_replacement(self.POOL, self.SETTINGS)
+        waiver = value_over_replacement(self.POOL, self.SETTINGS, basis=ReplacementBasis.WAIVER)
+        by_id = {v.player.espn_player_id: v for v in waiver}
+        for v in starter:
+            assert by_id[v.player.espn_player_id].value >= v.value
+
+    def test_a_league_with_no_roster_size_falls_back_to_the_starter_basis(self):
+        """roster_size defaults to 0 for a hand-built settings object, and a
+        pool size of zero means there is no draft to be outside of. Guessing
+        one would be worse than declining to."""
+        settings = LeagueSettings(
+            scoring_format="points",
+            num_teams=2,
+            roster_slots={"PG": 1, "C": 1, "UTIL": 1},
+            point_weights={"pts": 1.0},
+        )
+        assert waiver_replacement_levels(
+            self.POOL, settings, self.points
+        ) == compute_replacement_levels(self.POOL, settings, self.points)
+
+    def test_a_pool_smaller_than_the_draft_has_no_free_players(self):
+        """Everyone is rostered, so the floor is the worst player at the slot
+        rather than 0.0 — which would hand everyone their whole projection."""
+        settings = LeagueSettings(
+            scoring_format="points",
+            num_teams=10,
+            roster_slots={"PG": 1},
+            point_weights={"pts": 1.0},
+            roster_size=13,
+        )
+        pool = [P(1, ["PG"], 50), P(2, ["PG"], 40)]
+        levels = waiver_replacement_levels(pool, settings, {1: 50.0, 2: 40.0})
+        assert levels == {"PG": 40.0}
+
+    def test_the_default_basis_leaves_existing_numbers_alone(self):
+        assert value_over_replacement(self.POOL, self.SETTINGS) == value_over_replacement(
+            self.POOL, self.SETTINGS, basis=ReplacementBasis.STARTER
+        )
+
+
+class TestMarginalBasis:
+    """Value as what the league loses when a player is removed.
+
+    2 teams, PG:1 / C:1 / UTIL:1 -> six chairs. Guards 50/40/30, centres
+    45/20/10, so six players fit exactly six chairs with nobody spare.
+    """
+
+    SETTINGS: ClassVar[LeagueSettings] = LeagueSettings(
+        scoring_format="points",
+        num_teams=2,
+        roster_slots={"PG": 1, "C": 1, "UTIL": 1},
+        point_weights={"pts": 1.0},
+        roster_size=3,
+    )
+
+    def pool(self, *players):
+        return list(players)
+
+    def test_every_chair_is_filled_exactly_once(self):
+        """The flaw this basis exists to fix: the scarcest-slot rule let 111
+        players claim 10 chairs. Here six chairs seat six players."""
+        pool = [
+            P(1, ["PG"], 50), P(2, ["PG"], 40), P(3, ["PG"], 30),
+            P(4, ["C"], 45), P(5, ["C"], 20), P(6, ["C"], 10),
+        ]  # fmt: skip
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        seating = optimal_seating(pool, points, {"PG": 2, "C": 2, "UTIL": 2})
+        assert len(seating) == 6
+        assert sorted(collections.Counter(seating.values()).items()) == [
+            ("C", 2),
+            ("PG", 2),
+            ("UTIL", 2),
+        ]
+
+    def test_the_best_players_get_the_chairs(self):
+        pool = [P(1, ["PG"], 50), P(2, ["PG"], 40), P(3, ["PG"], 30)]
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        seating = optimal_seating(pool, points, {"PG": 1, "C": 1})
+        assert set(seating) == {1}  # only one chair a guard can take
+
+    def test_a_player_is_valued_against_the_worst_starter_at_their_slot(self):
+        """Per slot, read off the seating — not a single league-wide number.
+
+        An earlier version asked "remove this player, who comes off the
+        bench", which is the textbook shadow price and which collapsed: on a
+        real league all 80 starters came back with the SAME replacement,
+        because flex chairs let one bench player reach any vacancy through an
+        alternating path, and the board became a ranking by projected points.
+        That path needs other managers to rearrange their lineups to backfill
+        your vacancy, which ten independent teams do not do.
+        """
+        settings = LeagueSettings(
+            scoring_format="points",
+            num_teams=1,
+            roster_slots={"PG": 1, "C": 2},
+            point_weights={"pts": 1.0},
+            roster_size=4,
+        )
+        pool = [P(1, ["PG"], 50), P(4, ["C"], 45), P(5, ["C"], 20), P(6, ["C"], 10)]
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        got = marginal_replacements(pool, settings, points)
+        # Two C chairs seat 45 and 20, so the marginal centre is 20.
+        assert got[4] == ("C", 20.0)
+        assert got[5] == ("C", 20.0)
+        # The one PG chair seats only him, so he is his own marginal starter.
+        assert got[1] == ("PG", 50.0)
+        # Unseated, so measured against the best player also on the bench.
+        assert got[6][0] == "BENCH"
+
+    def test_scarcity_survives_as_different_levels_per_slot(self):
+        """The property the shadow-price version destroyed. If every slot
+        shares one baseline, value is just projected points and the engine
+        has no reason to exist."""
+        settings = LeagueSettings(
+            scoring_format="points",
+            num_teams=1,
+            roster_slots={"PG": 1, "C": 1},
+            point_weights={"pts": 1.0},
+            roster_size=4,
+        )
+        pool = [P(1, ["PG"], 50), P(2, ["PG"], 48), P(4, ["C"], 30), P(5, ["C"], 5)]
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        got = marginal_replacements(pool, settings, points)
+        levels = {slot: repl for slot, repl in got.values() if slot != "BENCH"}
+        assert len(set(levels.values())) > 1
+
+    def test_it_does_not_depend_on_the_input_order(self):
+        """Where the cascade failed: four processing orders, four boards."""
+        pool = [
+            P(1, ["PG"], 50), P(2, ["PG", "SG"], 40), P(3, ["SF"], 30),
+            P(4, ["C"], 45), P(5, ["C", "PF"], 20), P(6, ["SG"], 10),
+        ]  # fmt: skip
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        first = marginal_replacements(pool, self.SETTINGS, points)
+        second = marginal_replacements(list(reversed(pool)), self.SETTINGS, points)
+        assert first == second
+
+    def test_demand_narrows_the_chairs(self):
+        """What the draft-time engine passes once seats start filling."""
+        pool = [P(1, ["PG"], 50), P(2, ["PG"], 40), P(3, ["PG"], 30)]
+        points = {p.espn_player_id: p.stats["pts"] for p in pool}
+        full = marginal_replacements(pool, self.SETTINGS, points)
+        narrowed = marginal_replacements(
+            pool, self.SETTINGS, points, demand={"PG": 1, "C": 0, "UTIL": 0}
+        )
+        assert sum(1 for s, _ in full.values() if s != "BENCH") > sum(
+            1 for s, _ in narrowed.values() if s != "BENCH"
+        )
+
+    def test_value_over_replacement_accepts_the_basis(self):
+        pool = [P(1, ["PG"], 50), P(4, ["C"], 45), P(5, ["C"], 20)]
+        got = value_over_replacement(pool, self.SETTINGS, basis=ReplacementBasis.MARGINAL)
+        assert {v.player.espn_player_id for v in got} == {1, 4, 5}
+        assert [v.value for v in got] == sorted((v.value for v in got), reverse=True)

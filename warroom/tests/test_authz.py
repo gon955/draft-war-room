@@ -6,6 +6,10 @@
   B with a READ share: POST a ranking        -> 403
   B with an EDIT share: POST a ranking       -> 200
   B with an EDIT share: DELETE the board     -> 403  (owner-only)
+  B with a READ share: PATCH a tier          -> 403
+  B with an EDIT share: compute valuations   -> 403  (league owner only)
+  B with a READ share: GET best-available    -> 200
+  B with a READ share: POST a mock pick      -> 403
   a non-owner POSTing to /boards/{id}/shares -> 404/403
 
 404-not-403 is the assertion that matters: 403 tells an attacker the board is
@@ -274,6 +278,283 @@ class TestRankingAccessOverHttp:
     def test_a_ranking_id_that_does_not_exist_is_404(self, client, auth_a):
         response = client.patch(f"/rankings/{uuid.uuid4()}", json={"note": "x"}, headers=auth_a)
         assert response.status_code == 404
+
+
+class TestTierAccessOverHttp:
+    """Tiers over HTTP (SPEC 4: board access to read, edit access to write).
+
+    The read-share-cannot-PATCH case is the one that carries this class. Every
+    other case here passes even if the id-scoped routes call
+    require_board_access instead of require_edit_access, so without it a tier
+    route that hands write access to every read-share holder looks green.
+    """
+
+    @staticmethod
+    def _tier_on_as_board(client, board, auth_a):
+        created = client.post(f"/boards/{board.id}/tiers", json={"label": "Elite"}, headers=auth_a)
+        assert created.status_code == 201
+        return created.json()["id"]
+
+    def test_b_lists_as_tiers_with_no_share_is_404(self, client, board, auth_b):
+        assert client.get(f"/boards/{board.id}/tiers", headers=auth_b).status_code == 404
+
+    def test_b_patches_as_tier_with_no_share_is_404(self, client, board, auth_a, auth_b):
+        tier_id = self._tier_on_as_board(client, board, auth_a)
+
+        response = client.patch(f"/tiers/{tier_id}", json={"label": "mine now"}, headers=auth_b)
+
+        assert response.status_code == 404
+
+    def test_b_deletes_as_tier_with_no_share_is_404(self, client, board, auth_a, auth_b):
+        tier_id = self._tier_on_as_board(client, board, auth_a)
+
+        assert client.delete(f"/tiers/{tier_id}", headers=auth_b).status_code == 404
+
+    def test_read_share_can_list_tiers(self, client, board, auth_b, read_share):
+        # Otherwise a shared board renders with no grouping at all.
+        assert client.get(f"/boards/{board.id}/tiers", headers=auth_b).status_code == 200
+
+    def test_read_share_cannot_post_a_tier(self, client, board, auth_b, read_share):
+        response = client.post(f"/boards/{board.id}/tiers", json={"label": "Elite"}, headers=auth_b)
+        assert response.status_code == 403
+
+    def test_read_share_cannot_patch_a_tier(self, client, board, auth_a, auth_b, read_share):
+        # 403, not 404: B can already see this tier, so there is nothing left to
+        # conceal — only the operation is too privileged.
+        tier_id = self._tier_on_as_board(client, board, auth_a)
+
+        response = client.patch(f"/tiers/{tier_id}", json={"label": "mine now"}, headers=auth_b)
+
+        assert response.status_code == 403
+
+    def test_read_share_cannot_delete_a_tier(self, client, board, auth_a, auth_b, read_share):
+        tier_id = self._tier_on_as_board(client, board, auth_a)
+
+        assert client.delete(f"/tiers/{tier_id}", headers=auth_b).status_code == 403
+
+    def test_edit_share_can_post_a_tier(self, client, board, auth_b, edit_share):
+        response = client.post(f"/boards/{board.id}/tiers", json={"label": "Elite"}, headers=auth_b)
+        assert response.status_code == 201
+
+    def test_edit_share_can_patch_and_delete_a_tier(
+        self, client, board, auth_a, auth_b, edit_share
+    ):
+        tier_id = self._tier_on_as_board(client, board, auth_a)
+
+        patched = client.patch(f"/tiers/{tier_id}", json={"label": "Studs"}, headers=auth_b)
+
+        assert patched.status_code == 200
+        assert client.delete(f"/tiers/{tier_id}", headers=auth_b).status_code == 204
+
+    def test_stranger_cannot_post_a_tier(self, client, board, auth_b):
+        response = client.post(f"/boards/{board.id}/tiers", json={"label": "Elite"}, headers=auth_b)
+        assert response.status_code == 404
+
+    def test_a_tier_id_that_does_not_exist_is_404(self, client, auth_a):
+        response = client.patch(f"/tiers/{uuid.uuid4()}", json={"label": "x"}, headers=auth_a)
+        assert response.status_code == 404
+
+
+class TestValuationAccessOverHttp:
+    """Players and valuations (SPEC 4: league access to read, owner to compute).
+
+    The split that matters is read versus compute. Both GETs take
+    require_league_access, which a board share grants — a read share that shows
+    the board but not one player on it is worthless. Computing is
+    require_league_owner, because it overwrites reference data every
+    share-holder reads and costs the owner's own ESPN-derived pool.
+
+    B reaches this league only through the share on A's board, which is exactly
+    the path require_league_access walks.
+    """
+
+    def test_read_share_can_list_players(self, client, league, auth_b, players, read_share):
+        assert client.get(f"/leagues/{league.id}/players", headers=auth_b).status_code == 200
+
+    def test_read_share_can_list_valuations(self, client, league, auth_b, players, read_share):
+        assert client.get(f"/leagues/{league.id}/valuations", headers=auth_b).status_code == 200
+
+    def test_read_share_cannot_compute(self, client, league, auth_b, players, read_share):
+        # 403, not 404: B can already see this league's pool, so there is
+        # nothing left to conceal — only the operation is too privileged.
+        response = client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_b)
+        assert response.status_code == 403
+
+    def test_edit_share_cannot_compute_either(self, client, league, auth_b, players, edit_share):
+        # An edit share is permission on a BOARD, never on the league behind it.
+        response = client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_b)
+        assert response.status_code == 403
+
+    def test_stranger_cannot_list_players(self, client, league, auth_b, players):
+        assert client.get(f"/leagues/{league.id}/players", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_list_valuations(self, client, league, auth_b, players):
+        assert client.get(f"/leagues/{league.id}/valuations", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_compute(self, client, league, auth_b, players):
+        response = client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_b)
+        assert response.status_code == 404
+
+    def test_the_owner_can_do_all_three(self, client, league, auth_a, players):
+        assert (
+            client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a).status_code
+            == 200
+        )
+        assert client.get(f"/leagues/{league.id}/players", headers=auth_a).status_code == 200
+        assert client.get(f"/leagues/{league.id}/valuations", headers=auth_a).status_code == 200
+
+    def test_a_league_id_that_does_not_exist_is_404(self, client, auth_a):
+        assert client.get(f"/leagues/{uuid.uuid4()}/players", headers=auth_a).status_code == 404
+
+
+class TestAutotierAccessOverHttp:
+    """POST /boards/{id}/tiers/auto — edit access, like every other tier write.
+
+    Not in SPEC 4's endpoint list (SPEC 5.4 and SPEC 8 require the feature), so
+    its place in the matrix is worth stating explicitly rather than inferring:
+    it rewrites a board's tiers and its rankings' tier_id, which is a board
+    write, so an edit share is enough and a read share is not.
+    """
+
+    @staticmethod
+    def _valued(client, league, auth_a):
+        assert (
+            client.post(f"/leagues/{league.id}/valuations/compute", headers=auth_a).status_code
+            == 200
+        )
+
+    def test_read_share_cannot_autotier(
+        self, client, league, board, auth_a, auth_b, players, read_share
+    ):
+        self._valued(client, league, auth_a)
+
+        response = client.post(f"/boards/{board.id}/tiers/auto", headers=auth_b, json={})
+
+        assert response.status_code == 403
+
+    def test_edit_share_can_autotier(
+        self, client, league, board, auth_a, auth_b, players, edit_share
+    ):
+        self._valued(client, league, auth_a)
+
+        response = client.post(f"/boards/{board.id}/tiers/auto", headers=auth_b, json={})
+
+        assert response.status_code == 201
+
+    def test_stranger_cannot_autotier(self, client, league, board, auth_a, auth_b, players):
+        self._valued(client, league, auth_a)
+
+        response = client.post(f"/boards/{board.id}/tiers/auto", headers=auth_b, json={})
+
+        assert response.status_code == 404
+
+    def test_a_board_id_that_does_not_exist_is_404(self, client, auth_a):
+        response = client.post(f"/boards/{uuid.uuid4()}/tiers/auto", headers=auth_a, json={})
+        assert response.status_code == 404
+
+
+class TestMockAccessOverHttp:
+    """Mock drafts (SPEC 4: board access to read, edit access to write).
+
+    The case that carries this class is a READ share reading best-available.
+    Sharing a board so someone can follow along on draft night is the whole
+    point of the feature, and a copy-pasted require_edit_access would break it
+    while every write-side test here still passed.
+    """
+
+    @staticmethod
+    def _mock_on_as_board(client, board, auth_a):
+        created = client.post(
+            f"/boards/{board.id}/mocks", json={"name": "Mock", "my_draft_slot": 1}, headers=auth_a
+        )
+        assert created.status_code == 201
+        return created.json()["id"]
+
+    def test_b_lists_as_mocks_with_no_share_is_404(self, client, board, auth_b, players):
+        assert client.get(f"/boards/{board.id}/mocks", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_create_a_mock(self, client, board, auth_b, players):
+        response = client.post(
+            f"/boards/{board.id}/mocks",
+            json={"name": "Mine now", "my_draft_slot": 1},
+            headers=auth_b,
+        )
+        assert response.status_code == 404
+
+    def test_stranger_cannot_read_the_draft_board(self, client, board, auth_a, auth_b, players):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/picks", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_read_best_available(self, client, board, auth_a, auth_b, players):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/best-available", headers=auth_b).status_code == 404
+
+    def test_stranger_cannot_set_a_pick(self, client, board, auth_a, auth_b, players):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        response = client.post(
+            f"/mocks/{mock_id}/picks",
+            json={"pick_number": 1, "player_id": str(players[0].id)},
+            headers=auth_b,
+        )
+        assert response.status_code == 404
+
+    def test_read_share_can_list_mocks(self, client, board, auth_b, players, read_share):
+        assert client.get(f"/boards/{board.id}/mocks", headers=auth_b).status_code == 200
+
+    def test_read_share_can_read_the_draft_board(
+        self, client, board, auth_a, auth_b, players, read_share
+    ):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/picks", headers=auth_b).status_code == 200
+
+    def test_read_share_can_read_best_available(
+        self, client, board, auth_a, auth_b, players, read_share
+    ):
+        # Following along on draft night is exactly what a read share is for.
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        assert client.get(f"/mocks/{mock_id}/best-available", headers=auth_b).status_code == 200
+
+    def test_read_share_cannot_create_a_mock(self, client, board, auth_b, players, read_share):
+        response = client.post(
+            f"/boards/{board.id}/mocks", json={"name": "Theirs", "my_draft_slot": 1}, headers=auth_b
+        )
+        assert response.status_code == 403
+
+    def test_read_share_cannot_set_a_pick(self, client, board, auth_a, auth_b, players, read_share):
+        # 403, not 404: B can already see this draft, so only the operation is
+        # too privileged — there is nothing left to conceal.
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        response = client.post(
+            f"/mocks/{mock_id}/picks",
+            json={"pick_number": 1, "player_id": str(players[0].id)},
+            headers=auth_b,
+        )
+        assert response.status_code == 403
+
+    def test_edit_share_can_create_a_mock(self, client, board, auth_b, players, edit_share):
+        response = client.post(
+            f"/boards/{board.id}/mocks", json={"name": "Ours", "my_draft_slot": 1}, headers=auth_b
+        )
+        assert response.status_code == 201
+
+    def test_edit_share_can_set_a_pick(self, client, board, auth_a, auth_b, players, edit_share):
+        mock_id = self._mock_on_as_board(client, board, auth_a)
+
+        response = client.post(
+            f"/mocks/{mock_id}/picks",
+            json={"pick_number": 1, "player_id": str(players[0].id)},
+            headers=auth_b,
+        )
+        assert response.status_code == 200
+
+    def test_a_mock_id_that_does_not_exist_is_404(self, client, auth_a):
+        assert client.get(f"/mocks/{uuid.uuid4()}/picks", headers=auth_a).status_code == 404
 
 
 class TestShareManagementOverHttp:

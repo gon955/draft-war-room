@@ -49,7 +49,7 @@ def create_share(
 
     if recipient.id == user.id:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="You already own this board.",
         )
 
