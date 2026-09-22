@@ -145,7 +145,14 @@ jobs:
 
       - run: npm ci
 
-      - run: npx tsc --noEmit
+      # `npm run typecheck`, not a bare `tsc --noEmit`: it runs
+      # `next typegen` first. Next 16 generates the route helper types
+      # (LayoutProps, PageProps) into .next/types, and `next build`
+      # generates them as a side effect — so on a developer's machine a
+      # stale .next from an earlier build makes tsc pass, while a clean
+      # checkout here fails with "Cannot find name 'LayoutProps'".
+      # Pairing them means this step means the same thing in both places.
+      - run: npm run typecheck
 
       # `eslint`, not `next lint` — that command was removed in Next 16, and
       # `next build` no longer lints on its own.

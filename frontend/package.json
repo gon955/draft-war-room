@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit",
     "types": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/lib/types.ts",
     "types:check": "npm run types && git diff --exit-code src/lib/types.ts"
   },
