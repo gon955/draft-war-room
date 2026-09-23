@@ -125,11 +125,82 @@ def _split_rebounds(player: PlayerProjection, stat: str) -> float | None:
     return total * share if stat == "oreb" else total * (1.0 - share)
 
 
+# The box-score categories a double-double is counted over. Note these are
+# fixed by the STAT, not by the league: a league that does not score points
+# still counts a 10-point game toward a double-double.
+DOUBLE_CATEGORIES = ("pts", "reb", "ast", "stl", "blk")
+DOUBLE_THRESHOLD = 10
+
+
+def _p_reaches_threshold(per_game: float) -> float:
+    """P(a category clears 10 in one game), modelling it as Poisson.
+
+    Poisson is wrong in detail — points come in twos and threes, and minutes
+    vary — but it is wrong where it does not matter. For a category averaging
+    well under 10 the probability is near zero and for one averaging well over
+    it is near one; the only players where the shape matters are those sitting
+    near the threshold, and there the error is symmetric. Validated below.
+    """
+    if per_game <= 0:
+        return 0.0
+    term = math.exp(-per_game)
+    cumulative = term
+    for k in range(1, DOUBLE_THRESHOLD):
+        term *= per_game / k
+        cumulative += term
+    return max(0.0, 1.0 - cumulative)
+
+
+def _double_doubles(player: PlayerProjection, stat: str) -> float | None:
+    """Projected double-doubles (or triple-doubles) over a season.
+
+    ESPN scores both and projects neither, so without this a league that pays
+    for them scores them at zero for everybody. On one real 10-team league
+    that was 1831 double-doubles across the pool — 9,155 unscored points, and
+    513 of them on Jokic alone, about 15% of his projection. It is also
+    position-biased: it silently penalises exactly the bigs and playmakers who
+    accumulate them.
+
+    How many categories clear 10 in a game is a sum of five indicator
+    variables, so its distribution comes from one convolution rather than an
+    inclusion-exclusion mess. A double-double is two or more, a triple-double
+    three or more — and ESPN counts a triple-double as BOTH, which is not an
+    assumption here but a measurement: across 353 players with 2026 actuals,
+    not one had td > dd.
+
+    Categories are treated as independent, which they are not (a heavy
+    rebounding night tends to be a heavy minutes night). Measured, that leaves
+    the estimate slightly low on players who rarely post one, while the
+    least-squares slope through the high-volume players is 1.005 — close
+    enough to 1 that scaling it would be fitting noise.
+    """
+    games = player.stats.get("gp")
+    if not games:
+        return None
+
+    distribution = [1.0]
+    for category in DOUBLE_CATEGORIES:
+        total = player.stats.get(category)
+        if total is None:
+            return None
+        probability = _p_reaches_threshold(total / games)
+        nxt = [0.0] * (len(distribution) + 1)
+        for count, weight in enumerate(distribution):
+            nxt[count] += weight * (1.0 - probability)
+            nxt[count + 1] += weight * probability
+        distribution = nxt
+
+    needed = 3 if stat == "td" else 2
+    return games * sum(distribution[needed:])
+
+
 Estimator = tuple[Callable[[PlayerProjection, str], float | None], str]
 
 ESTIMATORS: dict[str, Estimator] = {
     "oreb": (_split_rebounds, "reb x position offensive share"),
     "dreb": (_split_rebounds, "reb x (1 - position offensive share)"),
+    "dd": (_double_doubles, "P(2+ categories reach 10) x games"),
+    "td": (_double_doubles, "P(3+ categories reach 10) x games"),
 }
 
 # Stats no model here attempts. Listed rather than merely absent, so the report
@@ -302,7 +373,17 @@ def untrustworthy_share(coverage: Iterable[StatCoverage]) -> float:
 #                           infer from a total than defensive ones, which is
 #                           why they get their own number.
 BASELINE_RELATIVE_SD = 0.367
-ESTIMATOR_RELATIVE_SD: dict[str, float] = {"oreb": 0.401, "dreb": 0.151}
+ESTIMATOR_RELATIVE_SD: dict[str, float] = {
+    "oreb": 0.401,
+    "dreb": 0.151,
+    # Double-doubles, over the 110 players who posted five or more in
+    # 2026. Correlation with actuals 0.975, mean absolute error 1.34
+    # against 5.19 for the zero this replaced.
+    "dd": 0.302,
+    # No entry for "td": only six players cleared five triple-doubles,
+    # which is a sample too small to call a measurement, so it falls to
+    # UNMEASURED_ESTIMATOR_SD and widens the band more, not less.
+}
 # An estimator nobody has backtested yet. Deliberately pessimistic: an
 # unmeasured model should widen the band more than a measured one, not less.
 UNMEASURED_ESTIMATOR_SD = 0.50
