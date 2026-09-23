@@ -25,6 +25,7 @@ from warroom.valuation.stats import (
     UNMEASURED_ESTIMATOR_SD,
     Provenance,
     StatCoverage,
+    _double_doubles,
     offensive_share,
     player_uncertainty,
     pool_uncertainty,
@@ -358,3 +359,81 @@ class TestUncertainty:
         assert u.points_sd > 100
         assert u.model_points_sd > 10
         assert u.model_points_sd < u.points_sd
+
+
+class TestDoubleDoubles:
+    """Estimating a stat ESPN scores but never projects."""
+
+    WEIGHTS: ClassVar[dict[str, float]] = {"dd": 5.0, "td": 7.0}
+
+    def _p(self, gp, **per_game):
+        return PlayerProjection(
+            espn_player_id=1,
+            name="P",
+            positions=("C",),
+            stats={"gp": gp, **{k: v * gp for k, v in per_game.items()}},
+        )
+
+    def test_a_nightly_double_double_is_projected_most_games(self):
+        big = self._p(70, pts=22.0, reb=12.0, ast=3.0, stl=0.9, blk=1.0)
+        assert _double_doubles(big, "dd") > 45
+
+    def test_a_player_who_fills_one_column_posts_almost_none(self):
+        scorer = self._p(70, pts=24.0, reb=3.0, ast=2.0, stl=0.8, blk=0.2)
+        assert _double_doubles(scorer, "dd") < 3
+
+    def test_triple_doubles_are_rarer_than_double_doubles(self):
+        """A triple-double is also a double-double — measured, not assumed:
+        across 353 players with 2026 actuals, none had td > dd."""
+        allrounder = self._p(70, pts=27.0, reb=12.0, ast=10.0, stl=1.4, blk=0.8)
+        assert _double_doubles(allrounder, "td") < _double_doubles(allrounder, "dd")
+
+    def test_a_triple_double_threat_gets_a_real_count(self):
+        jokic = self._p(72, pts=28.2, reb=12.7, ast=10.1, stl=1.6, blk=0.8)
+        assert 20 < _double_doubles(jokic, "td") < 55
+
+    def test_it_scales_with_games_played(self):
+        rate = {"pts": 22.0, "reb": 12.0, "ast": 3.0, "stl": 0.9, "blk": 1.0}
+        half = _double_doubles(self._p(40, **rate), "dd")
+        full = _double_doubles(self._p(80, **rate), "dd")
+        assert full == pytest.approx(half * 2)
+
+    def test_a_player_with_no_games_cannot_be_estimated(self):
+        assert _double_doubles(self._p(0, pts=20.0, reb=11.0), "dd") is None
+
+    def test_a_missing_category_declines_rather_than_guessing(self):
+        """Every category is needed; scoring a missing one as zero would
+        quietly report a rebounder as never posting a double-double."""
+        partial = PlayerProjection(
+            espn_player_id=1, name="P", positions=("C",), stats={"gp": 70, "pts": 1500}
+        )
+        assert _double_doubles(partial, "dd") is None
+
+    def test_resolve_pool_now_fills_them_instead_of_zeroing(self):
+        pool = [
+            PlayerProjection(
+                espn_player_id=1,
+                name="Big",
+                positions=("C",),
+                stats={"gp": 70, "pts": 1540, "reb": 840, "ast": 210, "stl": 63, "blk": 70},
+            )
+        ]
+        resolved, coverage = resolve_pool(pool, self.WEIGHTS)
+        assert resolved[0].stats["dd"] > 0
+        provenance = {c.stat: c.provenance for c in coverage}
+        assert provenance["dd"] is Provenance.ESTIMATED
+        assert provenance["td"] is Provenance.ESTIMATED
+
+    def test_the_band_widens_for_players_who_lean_on_it(self):
+        pool = [
+            PlayerProjection(
+                espn_player_id=1,
+                name="Big",
+                positions=("C",),
+                stats={"gp": 70, "pts": 1540, "reb": 840, "ast": 210, "stl": 63, "blk": 70},
+            )
+        ]
+        resolved, coverage = resolve_pool(pool, self.WEIGHTS)
+        band = pool_uncertainty(resolved, self.WEIGHTS, coverage)[1]
+        assert band.model_share > 0.9  # this league scores nothing else
+        assert band.model_points_sd > 0
