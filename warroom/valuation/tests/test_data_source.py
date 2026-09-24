@@ -11,10 +11,13 @@ from typing import Any, ClassVar
 import pytest
 
 from warroom.valuation.data_source import (
+    HISTORY_SEASONS,
     EspnDataSource,
     FakePlayerDataSource,
     PlayerDataSource,
     ProjectionsUnavailable,
+    actual_stats_of,
+    history_from_cards,
     league_settings_from_raw,
     point_weights_from_raw,
     positions_of,
@@ -377,3 +380,148 @@ def _projection(player_id, positions, pts):
         positions=positions,
         stats={"pts": float(pts)},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Prior-season history
+# --------------------------------------------------------------------------- #
+
+
+def _card(player_id: int, season: int, **totals: float) -> dict[str, Any]:
+    """One entry of a kona_playercard response, as ESPN sends it.
+
+    Stat ids, not names: 42 GP, 40 MIN, 4 OREB, 5 DREB. The "00<year>" split
+    is the season's actual total. No totals at all is how ESPN lists a player
+    who was on a roster but never played that season.
+    """
+    ids = {"gp": "42", "min": "40", "oreb": "4", "dreb": "5"}
+    stats = [
+        {
+            "seasonId": season,
+            "id": f"00{season}",
+            "scoringPeriodId": 0,
+            "stats": {ids[name]: value for name, value in totals.items()},
+        }
+    ]
+    return {
+        "id": player_id,
+        "player": {
+            "id": player_id,
+            "fullName": f"p{player_id}",
+            "defaultPositionId": 5,
+            "eligibleSlots": [4, 11],
+            "proTeamId": 7,
+            "stats": stats,
+        },
+    }
+
+
+class _Card:
+    """Just the two attributes history_from_cards reads off an espn-api Player."""
+
+    def __init__(self, player_id, stats):
+        self.playerId = player_id
+        self.stats = stats
+
+
+class TestActualStats:
+    def test_reads_the_completed_season_not_the_projection(self):
+        stats = {
+            "2026_total": {"total": {"GP": 64.0, "OREB": 80.0}},
+            "2026_projected": {"total": {"GP": 70.0}},
+        }
+        assert actual_stats_of(stats, 2026) == {"gp": 64.0, "oreb": 80.0}
+
+    def test_a_player_with_no_stat_line_is_empty_not_missing(self):
+        assert actual_stats_of({"2026_total": {"total": None}}, 2026) == {}
+        assert actual_stats_of({}, 2026) == {}
+
+
+class TestHistoryFromCards:
+    def test_the_three_states_stay_distinct(self):
+        """A rookie, a player who lost the season to injury and a season that
+        was never read must not collapse into one another — the availability
+        model's whole signal is the difference between the first two."""
+        cards = {
+            2025: None,  # league could not be read that season
+            2026: [
+                _Card(1, {"2026_total": {"total": {"GP": 70.0}}}),
+                _Card(2, {"2026_total": {"total": None}}),
+            ],
+        }
+
+        history = history_from_cards(cards, [1, 2, 3])
+
+        assert history[1] == {2026: {"gp": 70.0}}
+        assert history[2] == {2026: {}}  # listed, never played
+        assert history[3] == {2026: None}  # not in the NBA
+        assert all(2025 not in h for h in history.values())
+
+    def test_players_nobody_asked_about_are_ignored(self):
+        cards = {2026: [_Card(1, {}), _Card(9, {})]}
+        assert set(history_from_cards(cards, [1])) == {1}
+
+
+class TestFakeHistory:
+    def test_defaults_to_nothing_known(self):
+        source = FakePlayerDataSource(None, [])
+        assert source.get_player_history(19048, SEASON, [1, 2]) == {1: {}, 2: {}}
+
+    def test_returns_what_it_was_given(self):
+        source = FakePlayerDataSource(None, [], history={1: {2026: {"gp": 60.0}}})
+        assert source.get_player_history(19048, SEASON, [1]) == {1: {2026: {"gp": 60.0}}}
+
+
+class TestEspnHistory:
+    @pytest.fixture
+    def cards(self, monkeypatch):
+        """Replace the one network call; record which seasons it was asked for.
+
+        Also puts back espn-api's `requests`: a real fetch installs the timeout
+        shim process-wide, and test_espn_timeout asserts on a clean install.
+        """
+        from espn_api.requests import espn_requests
+        from espn_api.requests.espn_requests import EspnFantasyRequests, ESPNInvalidLeague
+
+        monkeypatch.setattr(espn_requests, "requests", espn_requests.requests)
+
+        served = {
+            2026: [_card(1, 2026, gp=64, min=1853, oreb=80, dreb=268), _card(2, 2026)],
+            2025: [_card(1, 2025, gp=75, min=2094, oreb=102, dreb=268)],
+        }
+        asked: list[tuple[int, list[int], int]] = []
+
+        def get_player_card(self, player_ids, max_scoring_period):
+            asked.append((self.year, list(player_ids), max_scoring_period))
+            if self.year not in served:
+                raise ESPNInvalidLeague(f"League {self.league_id} does not exist")
+            return {"players": served[self.year]}
+
+        monkeypatch.setattr(EspnFantasyRequests, "get_player_card", get_player_card)
+        return asked
+
+    def test_fetches_exactly_the_prior_seasons(self, cards):
+        EspnDataSource().get_player_history(19048, SEASON, [1, 2, 3])
+        assert sorted(year for year, _, _ in cards) == list(range(SEASON - HISTORY_SEASONS, SEASON))
+
+    def test_by_id_in_one_request_per_season(self, cards):
+        EspnDataSource().get_player_history(19048, SEASON, [1, 2, 3])
+        assert all(ids == [1, 2, 3] for _, ids, _ in cards)
+        # 0 draws an HTTP 400 from ESPN; verified against the live API.
+        assert all(period >= 1 for _, _, period in cards)
+
+    def test_translates_the_raw_cards(self, cards):
+        history = EspnDataSource().get_player_history(19048, SEASON, [1, 2, 3])
+
+        assert history[1][2026] == {"gp": 64.0, "min": 1853.0, "oreb": 80.0, "dreb": 268.0}
+        assert history[1][2025]["gp"] == 75.0
+        assert history[2] == {2026: {}, 2025: None}
+        assert history[3] == {2026: None, 2025: None}
+
+    def test_a_season_the_league_did_not_exist_is_unknown_not_empty(self, cards):
+        history = EspnDataSource().get_player_history(19048, SEASON, [1])
+        assert SEASON - HISTORY_SEASONS not in history[1]
+
+    def test_no_players_means_no_requests(self, cards):
+        assert EspnDataSource().get_player_history(19048, SEASON, []) == {}
+        assert cards == []

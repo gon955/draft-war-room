@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from warroom.config import get_settings
 from warroom.models import MockDraft, MockPick, Player, Ranking, ScoringFormat, Valuation
 from warroom.services.valuation import NotAPointsLeague, settings_for, to_projection
 from warroom.valuation.draft import (
@@ -30,9 +31,9 @@ from warroom.valuation.draft import (
     bench_replacement,
     default_slot_eligibility,
     expected_next_best,
+    lineup_deltas,
     live_replacement_levels,
     live_values,
-    marginal_values,
     open_slots,
     pick_scores,
     picks_until_next,
@@ -69,6 +70,12 @@ class Recommendation:
     survival: float
     # What you could expect to get next turn, having taken this player now.
     expected_next: float
+    # The SIGNED lineup change, where `marginal` is its clamp at zero. Kept
+    # because from the moment your lineup fills, marginal is 0.0 for every
+    # candidate and can no longer order them — this still can, by how far each
+    # one sits below the starter they would have to displace. That is what
+    # stops a fifth centre outranking your only backup point guard.
+    lineup_delta: float
     # marginal + expected_next: what these two picks are worth together.
     score: float
     # What this player would add to YOUR starting lineup, in the same units as
@@ -169,7 +176,7 @@ def recommend(db: Session, mock: MockDraft) -> tuple[list[Recommendation], int]:
 
     needed = open_slots(mine, settings)
 
-    marginal = marginal_values(
+    delta = lineup_deltas(
         candidates=results,
         roster=mine,
         settings=settings,
@@ -177,14 +184,36 @@ def recommend(db: Session, mock: MockDraft) -> tuple[list[Recommendation], int]:
         bench=bench_replacement(projections, replacement, points),
         points=all_points,
     )
+    # The clamp, for display. `delta` keeps the ordering the clamp destroys.
+    marginal = {pid: max(0.0, d) for pid, d in delta.items()}
 
     # Step 3. Who picks between this pick and your next one, and what each
     # of those teams is short of — a team with your position still open is a
     # threat to your shortlist, one with it filled is not.
     upcoming = [(n, slot, is_mine) for n, slot, pid, is_mine in board_rows if pid is None]
     intervening = picks_until_next(upcoming)
+
+    # The room's board, for the survival model only. Built from ESPN's own
+    # projected total, which every other manager in the league can see and
+    # this app's cannot be. A pool synced before that column existed yields an
+    # empty mapping, and field_order then falls back to our own ordering —
+    # the previous behaviour, rather than an error.
+    market_rank = {
+        player.espn_player_id: rank
+        for rank, (player, _) in enumerate(
+            sorted(
+                (pair for pair in valued.values() if pair[0].espn_projected_points is not None),
+                key=lambda pair: -pair[0].espn_projected_points,
+            )
+        )
+    }
+
     survival = survival_probabilities(
-        results, [rosters.get(slot, []) for slot in intervening], settings
+        results,
+        [rosters.get(slot, []) for slot in intervening],
+        settings,
+        market_rank=market_rank,
+        market_weight=get_settings().draft_market_weight,
     )
     expected = expected_next_best(results, marginal, survival)
     scores = pick_scores(marginal, expected)
@@ -212,6 +241,7 @@ def recommend(db: Session, mock: MockDraft) -> tuple[list[Recommendation], int]:
                 ),
                 survival.get(result.value.player.espn_player_id, 1.0),
                 expected.get(result.value.player.espn_player_id, 0.0),
+                delta.get(result.value.player.espn_player_id, 0.0),
                 scores.get(result.value.player.espn_player_id, 0.0),
                 marginal.get(result.value.player.espn_player_id, 0.0),
             )

@@ -1,0 +1,39 @@
+# The local Postgres this project's .env expects. `docker compose up -d`.
+#
+# Port 5433, not 5432, on purpose: 5432 is almost always already taken by
+# another project's database or a system install, and the failure when it is
+# taken is silent in the worst way — the container refuses to bind, or worse
+# binds and the app connects to somebody else's server, finds no tables, and
+# reports a schema problem. .env and .env.example both point here.
+
+services:
+  db:
+    image: postgres:16
+    # Matches CI, and 15 is the floor rather than a preference: rankings' FK
+    # uses ON DELETE SET NULL (tier_id), which is PG15+ syntax.
+    container_name: warroom-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: warroom
+    ports:
+      - "5433:5432"
+    volumes:
+      - warroom-pgdata:/var/lib/postgresql/data
+      # Runs once, on an empty data directory, to add the test database the
+      # suite needs. conftest refuses to run against anything not ending in
+      # '_test', so without this `pytest` fails on a fresh machine with a
+      # message about the database name rather than about it being absent.
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      # Named database and user: a bare `pg_isready` passes while the server is
+      # still running its init scripts, so a compose dependency on it can start
+      # the app before warroom_test exists.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d warroom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  warroom-pgdata:

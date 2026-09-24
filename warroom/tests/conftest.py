@@ -25,6 +25,12 @@ depending on a default, and says out loud why a route's commit is survivable.
 
 ESPN is ALWAYS faked: `get_data_source_factory` is overridden with a factory
 over FakePlayerDataSource, so no test touches the network.
+
+The auth rate limiter is reset between tests, and that is not a convenience.
+It counts per client address, TestClient reports the same one for every test in
+the run, and the limit is reached about twenty auth calls in — so without the
+autouse fixture below, tests start failing in whatever order happens to cross
+the threshold. Passing alone and failing in a suite is the signature.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ from warroom.deps import get_data_source_factory
 from warroom.main import create_app
 from warroom.models import Board, BoardShare, League, Player, ScoringFormat, SharePermission, User
 from warroom.security import create_access_token, hash_password
+from warroom.throttle import auth_limiter
 from warroom.valuation.data_source import FakePlayerDataSource, fixed_source_factory
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 
@@ -78,6 +85,25 @@ SPEC_53_POOL = (
 )
 
 SPEC_53_EXPECTED_RANKING = [4, 1, 2, 5, 3, 6, 7]
+
+
+# --------------------------------------------------------------------------- #
+# Isolation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def reset_auth_limiter():
+    """Give every test the rate limiter's full budget.
+
+    Autouse because the coupling is invisible at the call site: a test that
+    logs in twice has no reason to know that thirty earlier tests already spent
+    the window. Reset before AND after, so a test that deliberately exhausts
+    the limit (see test_throttle.py) cannot leak that state either direction.
+    """
+    auth_limiter().reset()
+    yield
+    auth_limiter().reset()
 
 
 # --------------------------------------------------------------------------- #

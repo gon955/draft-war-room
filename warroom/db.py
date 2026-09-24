@@ -43,7 +43,28 @@ class Base(DeclarativeBase):
 
 settings = get_settings()
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+# Pool size is configured, not defaulted, and the reason is a mismatch that only
+# shows up under load. SQLAlchemy's defaults are pool_size=5 + max_overflow=10,
+# so 15 connections — against an AnyIO threadpool of 40. Every route in this app
+# is a sync `def`, so 40 of them can be in flight at once, and requests 16..40
+# each block for pool_timeout (30s by default) before failing with a pool
+# timeout that reads like a database outage. The invariant to preserve:
+#
+#     db_pool_size + db_max_overflow  >=  request_thread_limit
+#
+# main.py holds the threadpool to request_thread_limit, which is what makes
+# that hold. Raising either without the other re-opens the gap.
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_timeout=settings.db_pool_timeout,
+    # Managed Postgres and the proxies in front of it drop idle connections
+    # after a few minutes; pool_pre_ping catches that but pays a round trip to
+    # find out. Recycling below any sane idle timeout means it rarely has to.
+    pool_recycle=300,
+)
 
 SessionLocal = sessionmaker(expire_on_commit=False, bind=engine)
 

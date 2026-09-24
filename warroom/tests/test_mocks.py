@@ -1223,18 +1223,35 @@ class TestVonaEndpoint:
         # to come from someone strictly worse.
         assert top["expected_next"] < top["marginal_value"]
 
-    def test_a_board_of_tied_scores_still_ranks_by_value(self, client, auth_a, players, mock_id):
-        """Bench rounds tie every score at 0.0. The fallback has to be the
-        same chain the marginal sort uses, or the tie breaks on
-        espn_player_id and the board sorts itself by seniority."""
-        draft(client, mock_id, auth_a, 1, str(players[0].id))
-        draft(client, mock_id, auth_a, 4, str(players[3].id))
-        draft(client, mock_id, auth_a, 5, str(players[6].id))  # lineup full
+    def test_a_board_of_tied_scores_falls_through_to_your_roster(
+        self, client, auth_a, players, mock_id
+    ):
+        """Bench rounds tie every score at 0.0, so the fallback decides the
+        board. It used to be league-wide live value, which knows nothing about
+        your team — in a rebound-heavy league that recommended another centre
+        to a manager who already had five. It is now lineup_delta: how far
+        each player sits below the starter they would displace.
+
+        The original point of this test still stands underneath: whatever the
+        fallback is, it must not be espn_player_id, or the board sorts itself
+        by seniority."""
+        # The three BEST players, so nobody left can improve the lineup —
+        # otherwise the board is not tied at all. Taking Sam Forward (25) here
+        # instead used to tie because the seating maths dropped a negative
+        # starter and reported their seat as empty; with the seat correctly
+        # occupied, Peter Guard (40) would genuinely displace him.
+        draft(client, mock_id, auth_a, 1, str(players[0].id))  # Paul Guard, 50
+        draft(client, mock_id, auth_a, 4, str(players[3].id))  # Cal Center, 45
+        draft(client, mock_id, auth_a, 5, str(players[1].id))  # Peter Guard, 40
 
         items = recommended(client, mock_id, auth_a)["items"]
         assert all(i["score"] == 0.0 for i in items)
-        values = [i["live"]["value"] for i in items]
-        assert values == sorted(values, reverse=True)
+
+        deltas = [i["lineup_delta"] for i in items]
+        assert deltas == sorted(deltas, reverse=True)
+
+        ids = [i["player"]["espn_player_id"] for i in items]
+        assert ids != sorted(ids), "fell through to seniority"
 
 
 class TestConfidentSort:

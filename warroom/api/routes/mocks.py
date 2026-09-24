@@ -60,7 +60,7 @@ from warroom.schemas.player import Page, PlayerOut, Position, ValuationOut
 from warroom.schemas.ranking import RankingOut
 from warroom.services.lineup import my_lineup
 from warroom.services.recommendation import NotValuedYet, recommend
-from warroom.services.simulation import simulate
+from warroom.services.simulation import NoEspnProjections, simulate
 from warroom.services.valuation import NotAPointsLeague
 
 router = APIRouter(tags=["mocks"])
@@ -409,12 +409,24 @@ def recommendation(
             -r.score,
             -r.marginal,
             not r.fills_open_seat,
+            # -lineup_delta BEFORE league value, and this is the line that
+            # stops a sixth centre topping the board. Once your lineup is
+            # full, score, marginal and fills_open_seat are identical for
+            # every candidate, so the order used to fall straight through to
+            # a league-wide number that knows nothing about your roster —
+            # which in a rebound-heavy league means centres, every round,
+            # however many you already have. lineup_delta still separates
+            # them: it is how far each player sits below the starter they
+            # would have to displace, so a backup at a position you are one
+            # deep at outranks a fifth big.
+            -r.lineup_delta,
             -r.live.value.value,
             r.player.espn_player_id,
         ),
         RecommendationSort.MARGINAL: lambda r: (
             -r.marginal,
             not r.fills_open_seat,
+            -r.lineup_delta,
             -r.live.value.value,
             r.player.espn_player_id,
         ),
@@ -439,6 +451,7 @@ def recommendation(
                 valuation=ValuationOut.model_validate(r.valuation),
                 ranking=RankingOut.model_validate(r.ranking) if r.ranking is not None else None,
                 marginal_value=r.marginal,
+                lineup_delta=r.lineup_delta,
                 improves_lineup=r.marginal > 0.0,
                 fills_open_seat=r.fills_open_seat,
                 survival=r.survival,
@@ -520,8 +533,11 @@ def simulate_picks(
             reach=payload.reach,
             seed=payload.seed,
             stop_at_my_pick=payload.stop_at_my_pick,
+            bot_valuation=payload.bot_valuation,
         )
-    except (NotAPointsLeague, NotValuedYet) as exc:
+    except (NotAPointsLeague, NotValuedYet, NoEspnProjections) as exc:
+        # All three are "the data this needs is not there yet", and each names
+        # the endpoint that fixes it — /valuations/compute or /sync.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc

@@ -33,7 +33,15 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: pip install -r requirements.txt -r requirements-dev.txt
+      # requirements.lock, not requirements.txt — the lock is what the
+      # Dockerfile installs, so testing against a fresh resolution of the
+      # unpinned file means CI is green about a dependency set that never
+      # reaches production. requirements-dev.txt stays unpinned: it is tooling,
+      # it does not ship, and nothing in the image imports it.
+      - run: pip install -r requirements.lock -r requirements-dev.txt
+
+      - name: the lock and the image agree
+        run: pip check
 
       - run: ruff check .
 
@@ -45,6 +53,13 @@ jobs:
         run: |
           alembic downgrade -1
           alembic upgrade head
+
+      # Autogenerate against the migrated schema. Catches the drift the
+      # fixtures cannot: conftest builds its tables from Base.metadata, so a
+      # model change with no migration passes every test and then fails on
+      # deploy, where the release step runs the migrations instead.
+      - name: models match the migrations
+        run: alembic check
 
       - run: pytest -v
 
@@ -95,6 +110,15 @@ jobs:
           fi
 
           echo "health:   $(curl -s -m 2 http://127.0.0.1:8000/health)"
+
+          # The probes must disagree here, and that is the point of having two.
+          # This container has no database, so liveness is 200 (the process is
+          # fine) and readiness is 503 (it cannot serve). If /ready answered 200
+          # the split has collapsed and a machine with a dead database would
+          # stay in the load balancer.
+          ready=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ready)
+          echo "GET /ready: $ready (expected 503 — no database in this job)"
+          test "$ready" = 503
 
           # The dev console must not ship. main.py only registers GET /dev when
           # frontend/dev.html exists, and .dockerignore excludes it — so a 200
@@ -158,5 +182,22 @@ jobs:
       # `next build` no longer lints on its own.
       - run: npm run lint
 
-      # Writes out/ — the static export Cloudflare Pages serves.
+      # Writes out/ — the static export Cloudflare Pages serves. The variable
+      # is required: next.config.ts refuses a production build without it,
+      # because NEXT_PUBLIC_* is inlined into the bundle and an unset value
+      # ships a site calling 127.0.0.1. The value here is a stand-in — CI only
+      # proves the build works — and the REAL origin must be set in the
+      # Cloudflare Pages project, or the deployed site calls this one.
       - run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://warroom-api.invalid
+
+      # The static export cannot send headers on its own (output: "export"
+      # disables next.config's headers()), so they come from a generated
+      # _headers file that only Cloudflare reads. Nothing else would notice it
+      # going missing.
+      - name: the export carries its security headers
+        run: |
+          test -f out/_headers
+          grep -q "Content-Security-Policy" out/_headers
+          grep -q "connect-src 'self' https://warroom-api.invalid" out/_headers

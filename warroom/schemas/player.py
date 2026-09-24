@@ -61,6 +61,11 @@ class PlayerOut(BaseModel):
     # dict[str, float] rather than dict[str, Any]: projected_stats_of already
     # drops every non-numeric value, so the column only ever holds numbers.
     projections: dict[str, float]
+    # "ACTIVE", "DAY_TO_DAY" or "OUT" as of the last sync, or None for a pool
+    # synced before the column existed. Not part of the valuation — ESPN's
+    # projection already prices their view of games missed — but the one thing
+    # on this row that can make you skip a player the numbers like.
+    injury_status: str | None = None
 
 
 class ValuationOut(BaseModel):

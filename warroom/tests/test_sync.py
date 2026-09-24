@@ -26,12 +26,12 @@ from warroom.valuation.data_source import FakePlayerDataSource, fixed_source_fac
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 
 
-def point_source(client, settings, players):
+def point_source(client, settings, players, history=None):
     """Repoint the app at a source returning exactly these fixtures."""
     from warroom.deps import get_data_source_factory
 
     client.app.dependency_overrides[get_data_source_factory] = lambda: fixed_source_factory(
-        FakePlayerDataSource(settings=settings, players=players)
+        FakePlayerDataSource(settings=settings, players=players, history=history)
     )
 
 
@@ -188,6 +188,61 @@ class TestResync:
         second = db.scalar(select(Player.updated_at).where(Player.espn_player_id == 1))
 
         assert second > first
+
+
+class TestHistory:
+    """Prior seasons' actuals ride along with the pool, keyed by the season as
+    a string (JSON object keys have no other type) and with the difference
+    between absent, null and {} intact — see domain.PlayerHistory."""
+
+    SETTINGS = LeagueSettings(
+        scoring_format="points",
+        num_teams=2,
+        roster_slots={"PG": 1},
+        roster_size=13,
+        point_weights={"pts": 1.0},
+    )
+
+    def test_history_lands_on_the_row(self, client, db, auth_a, league):
+        point_source(
+            client,
+            self.SETTINGS,
+            [one_player(espn_player_id=7), one_player(espn_player_id=8, name="Rookie")],
+            history={
+                7: {SEASON - 1: {"gp": 64.0, "oreb": 80.0}, SEASON - 2: {}},
+                8: {SEASON - 1: None},
+            },
+        )
+
+        sync(client, league, auth_a)
+
+        rows = {p.espn_player_id: p.history for p in db.scalars(select(Player))}
+        assert rows[7] == {str(SEASON - 1): {"gp": 64.0, "oreb": 80.0}, str(SEASON - 2): {}}
+        assert rows[8] == {str(SEASON - 1): None}
+
+    def test_no_history_is_stored_as_nothing_known(self, client, db, auth_a, league, player_pool):
+        sync(client, league, auth_a)
+        assert {tuple(p.history) for p in db.scalars(select(Player))} == {()}
+
+    def test_a_resync_replaces_history(self, client, db, auth_a, league):
+        point_source(client, self.SETTINGS, [one_player()], history={1: {SEASON - 1: None}})
+        sync(client, league, auth_a)
+
+        point_source(client, self.SETTINGS, [one_player()], history={1: {SEASON - 1: {"gp": 3.0}}})
+        sync(client, league, auth_a)
+        db.expire_all()
+
+        row = db.scalar(select(Player).where(Player.espn_player_id == 1))
+        assert row.history == {str(SEASON - 1): {"gp": 3.0}}
+
+    def test_valuation_reads_it_back_with_integer_seasons(self, client, db, auth_a, league):
+        from warroom.services.valuation import to_projection
+
+        point_source(client, self.SETTINGS, [one_player()], history={1: {SEASON - 1: {"gp": 60.0}}})
+        sync(client, league, auth_a)
+
+        row = db.scalar(select(Player).where(Player.espn_player_id == 1))
+        assert to_projection(row).history == {SEASON - 1: {"gp": 60.0}}
 
 
 class TestLeagueSettings:

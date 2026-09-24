@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from warroom.schemas.player import Page, PlayerOut, PlayerWithValuationOut
 from warroom.schemas.ranking import RankingOut
+from warroom.services.simulation import BotValuation
 
 
 class MockCreate(BaseModel):
@@ -123,6 +124,11 @@ class RecommendationOut(BestAvailableOut):
     # fills; 0.0 means every seat they fit is held by someone better, so they
     # would be bench depth rather than an upgrade.
     marginal_value: float
+    # The same number before the clamp at zero. Negative is the useful case:
+    # it is how far this player sits BELOW the starter they would have to
+    # displace, which is the only thing separating candidates once your lineup
+    # is full and every marginal_value has collapsed to 0.0.
+    lineup_delta: float
     # False once no seat they fit is open or winnable — the fast read of the
     # number above.
     improves_lineup: bool
@@ -198,6 +204,16 @@ class SimulateIn(BaseModel):
     seed: int | None = None
     # False auto-drafts YOUR picks too, i.e. runs the rest of the board out.
     stop_at_my_pick: bool = True
+    # Whose opinion the bots draft on. "engine" is this app's own projections;
+    # "espn" is ESPN's published projected total for each player, already
+    # scored under this league's settings.
+    #
+    # Scarcity applies either way — the bots re-price every slot after every
+    # pick and fill their lineup before taking depth, because those are derived
+    # FROM the strength numbers rather than alongside them. What changes is who
+    # the room thinks is good, which is what makes "espn" the more realistic
+    # rehearsal: your leaguemates are reading ESPN's ranking, not yours.
+    bot_valuation: BotValuation = BotValuation.ENGINE
 
 
 class MadePickOut(BaseModel):

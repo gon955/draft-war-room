@@ -546,9 +546,39 @@ export interface paths {
         };
         /**
          * Health
-         * @description Liveness probe — the one endpoint that never needs auth or a DB.
+         * @description Liveness — the one endpoint that never needs auth or a DB.
+         *
+         *     Answering means the process is up and the threadpool is not exhausted.
+         *     It deliberately says nothing about whether the database is reachable;
+         *     that is /ready's job, and conflating them turns a database blip into a
+         *     machine restart.
          */
         get: operations["health_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ready
+         * @description Readiness — can this instance serve a real request?
+         *
+         *     SELECT 1 through the same pool every route uses, so this fails for the
+         *     same reasons they would: no database, exhausted pool, dead connection.
+         *     503 rather than an exception, because a readiness probe that 500s is
+         *     indistinguishable from one that crashed.
+         */
+        get: operations["ready_ready_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -635,6 +665,21 @@ export interface components {
             /** Name */
             name?: string | null;
         };
+        /**
+         * BotValuation
+         * @description Whose opinion of a player the simulated teams draft on.
+         *
+         *     ENGINE  this app's projections, reconciled against the league's scoring by
+         *             stats.py and cached on `valuations`.
+         *     ESPN    ESPN's own projected fantasy total, already scored under this
+         *             league's settings and stored on `players.espn_projected_points`.
+         *
+         *     Not stored on the mock. It changes who the bots take, not what the board
+         *     means, and re-running a mock with the other setting is the comparison
+         *     worth having rather than a migration.
+         * @enum {string}
+         */
+        BotValuation: "engine" | "espn";
         /**
          * ComputeIn
          * @description Optional knobs for a recompute. `{}` reuses the league's own settings.
@@ -950,6 +995,8 @@ export interface components {
             projections: {
                 [key: string]: number;
             };
+            /** Injury Status */
+            injury_status?: string | null;
         };
         /**
          * PlayerSort
@@ -1081,6 +1128,8 @@ export interface components {
             live: components["schemas"]["LiveValueOut"];
             /** Marginal Value */
             marginal_value: number;
+            /** Lineup Delta */
+            lineup_delta: number;
             /** Improves Lineup */
             improves_lineup: boolean;
             /** Fills Open Seat */
@@ -1243,6 +1292,8 @@ export interface components {
              * @default true
              */
             stop_at_my_pick: boolean;
+            /** @default engine */
+            bot_valuation: components["schemas"]["BotValuation"];
         };
         /**
          * SimulateOut
@@ -2592,6 +2643,28 @@ export interface operations {
         };
     };
     health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+        };
+    };
+    ready_ready_get: {
         parameters: {
             query?: never;
             header?: never;

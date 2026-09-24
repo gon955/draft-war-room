@@ -1,6 +1,11 @@
 // The single place that talks to the API. Every screen goes through it, so the
 // awkward parts of the contract are handled once rather than per call site.
 
+// Inlined at BUILD time, not read at runtime — so this default only ever
+// applies to `next dev`. A production build with NEXT_PUBLIC_API_URL unset is
+// refused outright in next.config.ts, because shipping this fallback means
+// every visitor's browser calling their own machine, and failing as a bare
+// network error that never mentions configuration.
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 export class ApiError extends Error {

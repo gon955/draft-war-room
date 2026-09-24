@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
+from functools import lru_cache
 
 from .domain import LeagueSettings, PlayerProjection, PlayerValue
 
@@ -64,6 +65,19 @@ class ReplacementBasis(str, Enum):
     MARGINAL = "marginal"
 
 
+# Memoized, and the cache is the point rather than a micro-optimisation. This
+# is a pure function over a TINY domain — a league has ~8 slots and its players
+# carry ~10 distinct position tuples between them, so there are under a hundred
+# distinct answers — but it is called from inside every replacement-level scan
+# and every augmenting path. Profiling a full 12x13 auto-draft: 832,496 calls
+# on the starter basis and 1,375,226 on the marginal one, each of them redoing
+# the same .upper() and .split() on the same handful of strings. It was the
+# single largest line in the profile.
+#
+# maxsize is bounded rather than None: the arguments come from league settings
+# and ESPN position data, so the key space is small and fixed, but an unbounded
+# cache on a long-lived process is a leak waiting for the one input that is not.
+@lru_cache(maxsize=4096)
 def default_slot_eligibility(slot: str, positions: tuple[str, ...]) -> bool:
     """Whether a player with `positions` can fill `slot` in a standard NBA league.
 
@@ -76,6 +90,9 @@ def default_slot_eligibility(slot: str, positions: tuple[str, ...]) -> bool:
     element of `positions`, so a literal check finds nobody eligible, the slot
     creates no starter demand, and every replacement level is computed against a
     shallower league than the real one.
+
+    Cacheable because it is total and side-effect free: the answer depends on
+    nothing but its two arguments, both hashable and both immutable.
     """
     slot = slot.upper()
     pos = {p.upper() for p in positions}
@@ -320,13 +337,21 @@ def waiver_replacement_levels(
 
 def _seat_player(
     player: PlayerProjection,
-    capacity: Mapping[str, int],
+    chairs: Sequence[tuple[str, int]],
     occupants: dict[str, list[PlayerProjection]],
     eligibility: Callable[[str, tuple[str, ...]], bool],
     visited: set[str],
 ) -> bool:
-    """Kuhn's augmenting path: seat `player`, reshuffling incumbents if need be."""
-    for slot, cap in sorted(capacity.items(), key=lambda kv: (kv[1], kv[0])):
+    """Kuhn's augmenting path: seat `player`, reshuffling incumbents if need be.
+
+    `chairs` is (slot, capacity) ALREADY ordered scarcest-first. It used to be
+    the capacity mapping, sorted here — on every call, including every level of
+    the recursion, for an ordering that cannot change during a seating. On a
+    full auto-draft that was 2,090,725 sorts and 15.8 million comparison-key
+    calls, and it was the top line in the marginal-basis profile. The sort now
+    happens once, in optimal_seating.
+    """
+    for slot, cap in chairs:
         if slot in visited or not eligibility(slot, player.positions):
             continue
         visited.add(slot)
@@ -335,7 +360,7 @@ def _seat_player(
             return True
         # Full: can any incumbent move elsewhere and free this chair?
         for index, incumbent in enumerate(occupants[slot]):
-            if _seat_player(incumbent, capacity, occupants, eligibility, visited):
+            if _seat_player(incumbent, chairs, occupants, eligibility, visited):
                 occupants[slot][index] = player
                 return True
     return False
@@ -356,8 +381,26 @@ def optimal_seating(
     no processing order to choose, no arbitrary answer.
     """
     occupants: dict[str, list[PlayerProjection]] = {slot: [] for slot in capacity}
+
+    # Ordered once, scarcest chair first, and handed down through the whole
+    # recursion — see _seat_player.
+    chairs = sorted(capacity.items(), key=lambda kv: (kv[1], kv[0]))
+
+    # Stop as soon as every chair is taken. Not a heuristic: _seat_player only
+    # ever returns True by finding a slot with a free chair somewhere along the
+    # path, so once occupancy equals total capacity every remaining player must
+    # fail. The greedy pass is best-first, so those are exactly the lowest
+    # scorers — mid-draft that is most of a 400-player pool being walked
+    # through the full augmenting-path search to be rejected one at a time.
+    total_chairs = sum(capacity.values())
+    seated_count = 0
+
     for player in sorted(players, key=lambda p: (-points[p.espn_player_id], p.espn_player_id)):
-        _seat_player(player, capacity, occupants, eligibility, set())
+        if seated_count >= total_chairs:
+            break
+        if _seat_player(player, chairs, occupants, eligibility, set()):
+            seated_count += 1
+
     return {p.espn_player_id: slot for slot, seated in occupants.items() for p in seated}
 
 
@@ -395,11 +438,18 @@ def marginal_replacements(
         return {p.espn_player_id: (BENCH_SLOT, 0.0) for p in players}
 
     seated = optimal_seating(players, points, capacity, eligibility)
-    bench = sorted(
-        (p for p in players if p.espn_player_id not in seated),
-        key=lambda p: (-points[p.espn_player_id], p.espn_player_id),
+    # max(), not sorted()[0]. Only the best unseated player is ever read, and
+    # sorting ordered ~300 players per pick to look at one of them.
+    unseated = [p for p in players if p.espn_player_id not in seated]
+    bench_level = (
+        points[
+            max(
+                unseated, key=lambda p: (points[p.espn_player_id], -p.espn_player_id)
+            ).espn_player_id
+        ]
+        if unseated
+        else 0.0
     )
-    bench_level = points[bench[0].espn_player_id] if bench else 0.0
 
     # The marginal STARTER at each slot: the worst player the optimal seating
     # actually put there.

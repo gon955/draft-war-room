@@ -78,7 +78,17 @@ export default function LeaguesPage() {
             <input value={espnId} onChange={(e) => setEspnId(e.target.value)} size={12} placeholder="espn league id" />
             <input value={season} onChange={(e) => setSeason(e.target.value)} size={6} placeholder="season" />
             <input value={name} onChange={(e) => setName(e.target.value)} size={16} placeholder="name" />
+            {/* type="password" because espn_s2 is a live session cookie, not
+                a setting: anyone who reads it over your shoulder or out of a
+                screen share is signed in as you at ESPN until it expires. The
+                API encrypts it at rest and never returns it (SPEC 2.3); this
+                is the same care at the only point where it is visible.
+                autoComplete="off" keeps it out of the browser's saved
+                form-fill, which is not an encrypted store. */}
             <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
               value={cookie}
               onChange={(e) => setCookie(e.target.value)}
               size={22}

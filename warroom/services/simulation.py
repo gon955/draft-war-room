@@ -12,11 +12,23 @@ Determinism is a feature, not a test convenience. `seed` makes a simulated
 draft reproducible, which is what lets you replay the same board against a
 different strategy of your own and see whether the difference was your pick or
 the dice.
+
+WHAT THE BOTS VALUE is a knob (BotValuation). By default they use this app's
+own projections; set it to ESPN and they use ESPN's published projected total
+for each player instead. Only the per-player STRENGTH input changes — every
+piece of scarcity machinery runs exactly as before, because live replacement
+levels are derived FROM that mapping rather than alongside it. So the bots
+still re-price each slot after every pick, still drain a position and lift what
+is left in it, and still fill their own lineup before taking depth. They just
+disagree with you about who is good, which is the entire point: a room full of
+bots using your own numbers cannot show you the player your league will let
+slide.
 """
 
 import random
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,6 +38,33 @@ from warroom.services.recommendation import NotValuedYet
 from warroom.services.valuation import NotAPointsLeague, settings_for, to_projection
 from warroom.valuation.draft import autodraft
 from warroom.valuation.engine import ReplacementBasis as EngineBasis
+
+
+class BotValuation(str, Enum):
+    """Whose opinion of a player the simulated teams draft on.
+
+    ENGINE  this app's projections, reconciled against the league's scoring by
+            stats.py and cached on `valuations`.
+    ESPN    ESPN's own projected fantasy total, already scored under this
+            league's settings and stored on `players.espn_projected_points`.
+
+    Not stored on the mock. It changes who the bots take, not what the board
+    means, and re-running a mock with the other setting is the comparison
+    worth having rather than a migration.
+    """
+
+    ENGINE = "engine"
+    ESPN = "espn"
+
+
+class NoEspnProjections(RuntimeError):
+    """ESPN mode was asked for and the player pool carries no ESPN totals.
+
+    Almost always a pool synced before the column existed: the value arrives in
+    the same payload as everything else, so one re-sync fills it. Distinct from
+    NotValuedYet, which is about THIS app's numbers being absent — the fix is a
+    different endpoint.
+    """
 
 
 @dataclass(frozen=True)
@@ -51,6 +90,7 @@ def simulate(
     reach: int = 3,
     seed: int | None = None,
     stop_at_my_pick: bool = True,
+    bot_valuation: BotValuation = BotValuation.ENGINE,
 ) -> SimulationResult:
     """Fill the opponents' picks up to your next turn. Does not commit."""
     league = mock.board.league
@@ -61,21 +101,45 @@ def simulate(
             f"points-league only; this league is scored by {league.scoring_format.value}."
         )
 
-    valued = {
-        player.id: (player, valuation)
-        for player, valuation in db.execute(
-            select(Player, Valuation)
-            .join(
-                Valuation,
-                (Valuation.player_id == Player.id) & (Valuation.league_id == league.id),
-            )
-            .where(Player.season == league.season)
-        ).all()
-    }
+    # ESPN mode drives off `players` alone, and deliberately so: drafting on
+    # ESPN's opinion should not require this app's engine to have run at all.
+    # ENGINE mode keeps the inner join, which is also what restricts the pool to
+    # players this league has actually valued — switching it to an outer join
+    # would quietly admit unvalued players at 0.0 and change the default path.
+    if bot_valuation is BotValuation.ESPN:
+        rows: list[tuple[Player, Valuation | None]] = [
+            (player, None)
+            for player in db.scalars(select(Player).where(Player.season == league.season))
+        ]
+    else:
+        rows = list(
+            db.execute(
+                select(Player, Valuation)
+                .join(
+                    Valuation,
+                    (Valuation.player_id == Player.id) & (Valuation.league_id == league.id),
+                )
+                .where(Player.season == league.season)
+            ).all()
+        )
+
+    valued = {player.id: (player, valuation) for player, valuation in rows}
     if not valued:
         raise NotValuedYet(
             "This league has no computed valuations yet, so there is nothing to "
             f"draft on. Run POST /leagues/{league.id}/valuations/compute first."
+        )
+
+    # Checked over the WHOLE pool, not over what is still available: late in a
+    # draft everyone left can legitimately be someone ESPN never projected, and
+    # that is a thin board rather than a misconfiguration.
+    if bot_valuation is BotValuation.ESPN and not any(
+        player.espn_projected_points for player, _ in rows
+    ):
+        raise NoEspnProjections(
+            "No ESPN projections are stored for this league's players, so the "
+            "simulated teams have nothing to draft on. They arrive with the "
+            f"normal player sync — run POST /leagues/{league.id}/sync and try again."
         )
 
     picks = list(
@@ -103,13 +167,35 @@ def simulate(
 
     settings = settings_for(league)
 
+    # THE one thing bot_valuation changes. Everything downstream — live
+    # replacement levels, the marginal basis, roster fit — is derived from this
+    # mapping, so swapping it swaps whose opinion the scarcity maths is applied
+    # TO without touching the maths itself.
+    #
+    # A player ESPN did not project scores 0.0 rather than being dropped: they
+    # belong in the pool (they are draftable, and they sit at the bottom of it,
+    # which is where an unprojected player belongs) and removing them would
+    # shrink the pool that sets every replacement level.
+    if bot_valuation is BotValuation.ESPN:
+        points = {p.espn_player_id: float(p.espn_projected_points or 0.0) for p, _ in available}
+        # Empty on purpose. `preseason` only decorates LiveValue with how far a
+        # number has moved since the preseason, and autodraft never reads it
+        # when choosing. Passing this app's cached baseline here while the bots
+        # price on ESPN's would report a shift between two different scales.
+        preseason: dict[int, tuple[float, float]] = {}
+    else:
+        points = {p.espn_player_id: v.projected_points for p, v in available if v is not None}
+        preseason = {
+            p.espn_player_id: (v.replacement_points, v.value) for p, v in available if v is not None
+        }
+
     made = autodraft(
         upcoming=upcoming,
         rosters=rosters,
         available=[to_projection(p) for p, _ in available],
         settings=settings,
-        points={p.espn_player_id: v.projected_points for p, v in available},
-        preseason={p.espn_player_id: (v.replacement_points, v.value) for p, v in available},
+        points=points,
+        preseason=preseason,
         # The league's own basis, so the bots and the board you read are
         # answering the same question. This was pinned to STARTER while the
         # marginal basis cost a league-wide re-solve per PLAYER per pick —
