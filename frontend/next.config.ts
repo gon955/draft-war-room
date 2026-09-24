@@ -9,7 +9,20 @@ import type { NextConfig } from "next";
 // So the build refuses instead. `next dev` is exempt: localhost is the right
 // answer there, and requiring the variable to run the dev server would only
 // train people to set it to something wrong.
-if (process.env.NODE_ENV === "production" && !process.env.NEXT_PUBLIC_API_URL) {
+//
+// `next typegen` (the first half of `npm run typecheck`) is exempt too. It
+// loads this file under the same production-build phase and NODE_ENV as a real
+// build, so neither can tell the two apart — but it only writes route types to
+// .next/types and emits no bundle, so there is nothing for the URL to be baked
+// into. Without this, typecheck fails on any machine with no .env.local, CI
+// included. The command name is the one signal that differs.
+const generatingTypesOnly = process.argv.includes("typegen");
+
+if (
+  process.env.NODE_ENV === "production" &&
+  !generatingTypesOnly &&
+  !process.env.NEXT_PUBLIC_API_URL
+) {
   throw new Error(
     "NEXT_PUBLIC_API_URL is not set.\n\n" +
       "It is baked into the JavaScript at build time, so an unset value cannot " +
