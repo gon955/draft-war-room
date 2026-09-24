@@ -25,3 +25,9 @@ out/
 format_check.py
 espn_diag.py
 roster_check.py
+
+# Planning and spec documents. Deliberately untracked: they are working notes
+# that move faster than the code and are shared as links rather than through
+# the repo. Both stay on disk.
+Draft_War_Room_SPEC.md
+HANDOFF.md

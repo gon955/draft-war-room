@@ -15,7 +15,7 @@ rather than "no such user".
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from warroom.authz import require_board_owner
@@ -40,7 +40,8 @@ def create_share(
 ) -> BoardShare:
     require_board_owner(db, board_id, user)
 
-    recipient = db.scalar(select(User).where(User.email == payload.email))
+    # lower(email), for the index — same reason as the lookups in auth.py.
+    recipient = db.scalar(select(User).where(func.lower(User.email) == payload.email))
     if recipient is None:
         # Deliberately a 404 with the module's generic detail. Answering "no
         # such user" here would turn this endpoint into an oracle for which

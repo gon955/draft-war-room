@@ -12,9 +12,13 @@ import type {
   Position,
   RecommendationPage,
   SimulateResult,
+  BotValuation,
   Tier,
 } from "@/lib/models";
 import { Headshot } from "@/components/Headshot";
+import { ConfidenceLegend } from "@/components/ConfidenceLegend";
+import { InjuryTag } from "@/components/InjuryTag";
+import { confidenceAria, confidenceOf, confidenceTitle } from "@/lib/confidence";
 
 function MockView() {
   const { ready, token } = useRequireAuth();
@@ -40,6 +44,10 @@ function MockView() {
   const requestId = useRef(0);
 
   const [position, setPosition] = useState<Position | "">("");
+  // Whose opinion the simulated teams draft on. Not persisted on the mock: it
+  // changes who the room takes, not what the board means, so re-running with
+  // the other setting is the comparison worth having.
+  const [bots, setBots] = useState<BotValuation>("engine");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -117,7 +125,10 @@ function MockView() {
   function runSim() {
     void mutate(async () => {
       setLastSim(
-        await api<SimulateResult>("POST", `/mocks/${mockId}/simulate`, { token, body: {} }),
+        await api<SimulateResult>("POST", `/mocks/${mockId}/simulate`, {
+          token,
+          body: { bot_valuation: bots },
+        }),
       );
     });
   }
@@ -147,6 +158,21 @@ function MockView() {
                 ← back to board
               </a>
             )}
+            <label>Bots draft on</label>
+            <select
+              value={bots}
+              onChange={(e) => setBots(e.target.value as BotValuation)}
+              title={
+                "Whose valuation the simulated teams use. Position scarcity and roster fit " +
+                "apply either way — they are computed FROM these numbers — so this changes " +
+                "who the room thinks is good, not how it drafts.\n\n" +
+                "ESPN is the more realistic rehearsal: your leaguemates are reading ESPN's " +
+                "ranking, not yours, which is what makes a player slide."
+              }
+            >
+              <option value="engine">our valuation</option>
+              <option value="espn">ESPN&rsquo;s valuation</option>
+            </select>
             <button className="primary" disabled={busy} onClick={runSim}>
               {busy ? "simulating…" : "simulate to my pick"}
             </button>
@@ -162,7 +188,7 @@ function MockView() {
                 ? lastSim.board_complete
                   ? "Board complete."
                   : "It's your pick — nothing to simulate."
-                : `Simulated ${lastSim.picks.length} pick${lastSim.picks.length === 1 ? "" : "s"}: ` +
+                : `Simulated ${lastSim.picks.length} pick${lastSim.picks.length === 1 ? "" : "s"} on ${bots === "espn" ? "ESPN's" : "our"} valuation: ` +
                   lastSim.picks.map((p) => `${p.player.name} (slot ${p.team_slot})`).join(", ") +
                   (lastSim.next_pick_number ? ` · you're on the clock at ${lastSim.next_pick_number}.` : "")}
             </p>
@@ -269,8 +295,15 @@ function MockView() {
                   <th className="num">Score</th>
                   {/* How much of this player's projection rests on stats we
                       inferred rather than ESPN projecting them. The part of
-                      the error bar that does NOT cancel between players. */}
-                  <th className="num">Model ±</th>
+                      the error bar that does NOT cancel between players.
+                      Graded against projected points rather than against the
+                      Value column beside it: value collapses toward zero as a
+                      draft runs, so a share of it would drift every candidate
+                      to "low" by round 8 and say more about the round than
+                      about the player. See lib/confidence.ts. */}
+                  <th className="num" title="How much of a player's projection the engine had to estimate rather than read from ESPN. Lower is better.">
+                    Conf
+                  </th>
                   <th />
                 </tr>
               </thead>
@@ -289,6 +322,7 @@ function MockView() {
                         />
                         <span className="stack">
                           {item.player.name}{" "}
+                          <InjuryTag status={item.player.injury_status} />{" "}
                           {item.ranking?.is_target && <span className="tag t">T</span>}
                           {item.ranking?.is_avoid && <span className="tag a">A</span>}
                           {item.ranking?.note && (
@@ -312,19 +346,43 @@ function MockView() {
                     </td>
                     <td className="num">{item.ranking?.user_rank ?? "—"}</td>
                     <td className="num">{item.live.value.toFixed(1)}</td>
+                    {/* "bench" used to be the whole story here, and it hid the
+                        ordering: once your lineup is full every candidate adds
+                        0.0, so the column read the same for all of them while
+                        the list was in some order the column could not
+                        explain. lineup_delta is that order — how far short of
+                        the starter they would displace each one falls. */}
                     <td className={item.improves_lineup ? "num" : "num muted"}>
-                      {item.improves_lineup
-                        ? `+${item.marginal_value.toFixed(1)}`
-                        : item.fills_open_seat
-                          ? "fills seat"
-                          : "bench"}
+                      {item.improves_lineup ? (
+                        `+${item.marginal_value.toFixed(1)}`
+                      ) : item.fills_open_seat ? (
+                        "fills seat"
+                      ) : (
+                        <span
+                          title={
+                            `${Math.abs(item.lineup_delta).toFixed(0)} short of the starter ` +
+                            `they would have to displace. Bench depth, but this is how close ` +
+                            `they come — and it is what orders the board once your lineup is full.`
+                          }
+                        >
+                          {item.lineup_delta.toFixed(0)}
+                        </span>
+                      )}
                     </td>
                     <td className="num muted">{`${Math.round(item.survival * 100)}%`}</td>
                     <td className="num">{item.score.toFixed(1)}</td>
-                    <td className="num muted">
-                      {item.valuation && item.valuation.model_sd > 0
-                        ? `±${item.valuation.model_sd.toFixed(0)}`
-                        : "—"}
+                    <td className="num">
+                      {item.valuation ? (
+                        <span
+                          className={`conf conf-${confidenceOf(item.valuation.projected_points, item.valuation.model_sd)}`}
+                          title={confidenceTitle(item.valuation.projected_points, item.valuation.model_sd)}
+                          aria-label={confidenceAria(item.valuation.projected_points, item.valuation.model_sd)}
+                        >
+                          ±{item.valuation.model_sd.toFixed(0)}
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
                     </td>
                     <td>
                       <button className="primary" disabled={busy} onClick={() => draft(item.player.id)}>
@@ -336,6 +394,7 @@ function MockView() {
                 })}
               </tbody>
             </table>
+            <ConfidenceLegend />
           </div>
         </div>
 

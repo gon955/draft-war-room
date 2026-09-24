@@ -12,9 +12,11 @@ and PlayerProjection. If ESPN changes their undocumented API, one file changes.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, Protocol, runtime_checkable
 
-from .domain import LeagueSettings, PlayerProjection
+from .domain import LeagueSettings, PlayerHistory, PlayerProjection, SeasonLine
 from .engine import NON_STARTING_SLOTS
 
 # The five real basketball positions. ESPN's eligibleSlots mixes these with flex
@@ -27,6 +29,88 @@ REAL_POSITIONS = frozenset({"PG", "SG", "SF", "PF", "C"})
 FREE_AGENT_POOL_SIZE = 400
 
 OFF_ROSTER_SLOTS = frozenset({"IR", "IL", "NA"})
+
+# How many completed seasons before the synced one to fetch actuals for. Three
+# because that is what the deepest consumer needs: availability weights games
+# played over three seasons, the rebound split and the experience buckets only
+# look at the last one or two.
+HISTORY_SEASONS = 3
+
+
+class EspnUnreachable(RuntimeError):
+    """ESPN did not answer in time, or the connection failed outright.
+
+    Separate from ProjectionsUnavailable, which means ESPN answered and had
+    nothing to publish. This one means the request never completed, so the
+    right response is "try again", not "value the prior season instead".
+    """
+
+
+# How long an ESPN call may take before it is abandoned. Process-wide rather
+# than per instance because the only place it can be enforced is a module-level
+# patch — see _install_request_timeout.
+DEFAULT_ESPN_TIMEOUT = 15.0
+
+
+class _TimeoutRequests:
+    """Stands in for the `requests` module inside espn_api.
+
+    espn-api calls the module-level requests.get()/requests.post() with no
+    timeout anywhere, and exposes no way to pass one. Left alone, a connection
+    ESPN accepts and never answers holds the calling thread for as long as the
+    process lives. That thread comes from the same AnyIO threadpool that serves
+    every other route INCLUDING /health, so enough stuck syncs stop the health
+    check and the platform restarts the machine — losing every draft in flight
+    to a fault that was only ever one league's sync hanging.
+
+    A shim over the module rather than a rewrite of espn-api, and rather than
+    socket.setdefaulttimeout: urllib3 sets its own socket timeouts per request,
+    so the process-wide default is overridden before it ever applies.
+
+    __getattr__ forwards everything else untouched, so this stays a true stand-in
+    for the module — if espn-api starts calling requests.put(), it keeps working
+    (without a timeout, which is why the assertion in the tests enumerates the
+    methods espn-api actually uses).
+    """
+
+    def __init__(self, delegate: Any, timeout: float):
+        self._delegate = delegate
+        self.timeout = timeout
+
+    def _with_timeout(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        # setdefault, not assignment: a caller that passes its own timeout
+        # means it, and silently overriding it would be the same class of
+        # surprise this shim exists to remove.
+        kwargs.setdefault("timeout", self.timeout)
+        return kwargs
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        return self._delegate.get(*args, **self._with_timeout(kwargs))
+
+    def post(self, *args: Any, **kwargs: Any) -> Any:
+        return self._delegate.post(*args, **self._with_timeout(kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+
+def _install_request_timeout(timeout: float) -> None:
+    """Give every espn-api HTTP call a timeout. Idempotent.
+
+    Installed on first use rather than at import, so merely importing this
+    module — which the test suite does constantly — does not reach into a third
+    party package. Re-called with a new timeout it updates the existing shim
+    instead of wrapping a wrapper, which would otherwise stack one layer per
+    request and eventually blow the stack.
+    """
+    from espn_api.requests import espn_requests
+
+    current = espn_requests.requests
+    if isinstance(current, _TimeoutRequests):
+        current.timeout = timeout
+        return
+
+    espn_requests.requests = _TimeoutRequests(current, timeout)
 
 
 class ProjectionsUnavailable(RuntimeError):
@@ -43,6 +127,9 @@ class ProjectionsUnavailable(RuntimeError):
 class PlayerDataSource(Protocol):
     def get_league_settings(self, espn_league_id: int, season: int) -> LeagueSettings: ...
     def get_player_pool(self, espn_league_id: int, season: int) -> list[PlayerProjection]: ...
+    def get_player_history(
+        self, espn_league_id: int, season: int, player_ids: Sequence[int]
+    ) -> dict[int, PlayerHistory]: ...
 
 
 class PlayerDataSourceFactory(Protocol):
@@ -71,17 +158,33 @@ def fixed_source_factory(source: PlayerDataSource) -> PlayerDataSourceFactory:
 
 
 class FakePlayerDataSource:
-    """In-memory data source for tests and local development."""
+    """In-memory data source for tests and local development.
 
-    def __init__(self, settings: LeagueSettings, players: list[PlayerProjection]):
+    `history` is keyed by espn_player_id. A player it does not mention gets an
+    empty history — no seasons known — which is what a league with no prior
+    seasons returns, so a fake built without it behaves like a new league.
+    """
+
+    def __init__(
+        self,
+        settings: LeagueSettings,
+        players: list[PlayerProjection],
+        history: Mapping[int, PlayerHistory] | None = None,
+    ):
         self._settings = settings
         self._players = players
+        self._history = dict(history or {})
 
     def get_league_settings(self, espn_league_id: int, season: int) -> LeagueSettings:
         return self._settings
 
     def get_player_pool(self, espn_league_id: int, season: int) -> list[PlayerProjection]:
         return list(self._players)
+
+    def get_player_history(
+        self, espn_league_id: int, season: int, player_ids: Sequence[int]
+    ) -> dict[int, PlayerHistory]:
+        return {pid: dict(self._history.get(pid, {})) for pid in player_ids}
 
 
 # --------------------------------------------------------------------------- #
@@ -205,13 +308,66 @@ def projected_stats_of(player_stats: dict[str, Any], season: int) -> dict[str, f
     Lowercasing matches point_weights_from_raw, which is what lets project_points
     line the two up.
     """
-    split = player_stats.get(f"{season}_projected", {})
-    totals = split.get("total") or {}
+    return _totals_of(player_stats, f"{season}_projected")
+
+
+def actual_stats_of(player_stats: dict[str, Any], season: int) -> SeasonLine:
+    """A COMPLETED season's actual totals, keyed like projected_stats_of.
+
+    Actuals carry stats the projection does not — oreb, dreb, dd, td, gs —
+    which is the reason history is worth fetching at all. Empty for a player
+    ESPN lists but who logged no stat line that season.
+    """
+    return _totals_of(player_stats, f"{season}_total")
+
+
+def _totals_of(player_stats: dict[str, Any], split_key: str) -> dict[str, float]:
+    totals = player_stats.get(split_key, {}).get("total") or {}
     return {
         str(code).lower(): float(value)
         for code, value in totals.items()
         if isinstance(value, (int, float))
     }
+
+
+def history_from_cards(
+    cards: Mapping[int, Sequence[Any] | None], player_ids: Sequence[int]
+) -> dict[int, PlayerHistory]:
+    """Assemble each player's history from one player-card fetch per season.
+
+    `cards` maps a season to the espn-api players ESPN returned for it, or to
+    None when the league could not be read for that season at all. The two
+    are kept apart all the way through: a player missing from a season that
+    WAS read is recorded as None (not in the NBA that year), while a season
+    that was not read is left out entirely (nothing known) — see PlayerHistory.
+    """
+    history: dict[int, PlayerHistory] = {pid: {} for pid in player_ids}
+    for season, players in cards.items():
+        if players is None:
+            continue
+        lines = {p.playerId: actual_stats_of(p.stats, season) for p in players}
+        for pid, seasons in history.items():
+            seasons[season] = lines.get(pid)
+    return history
+
+
+def espn_applied_total(player_stats: dict[str, Any], season: int) -> float | None:
+    """ESPN's own projected fantasy total for the season, or None.
+
+    `appliedTotal` on the projected split: the stat line ESPN projects, scored
+    with THIS league's settings, by ESPN. It sits in the same dict as the raw
+    totals projected_stats_of reads and was previously thrown away.
+
+    Worth keeping because it is an independent opinion rather than a different
+    route to ours. ESPN projects every stat it scores — including oreb/dreb and
+    double-doubles, which it does not publish and stats.py therefore has to
+    model — so this number is the one place their estimate of those is visible.
+    """
+    split = player_stats.get(f"{season}_projected", {})
+    total = split.get("applied_total")
+    if not isinstance(total, (int, float)):
+        return None
+    return float(total)
 
 
 class EspnDataSource:
@@ -223,9 +379,15 @@ class EspnDataSource:
     which are live session secrets and never logged or persisted here (SPEC 2.3).
     """
 
-    def __init__(self, espn_s2: str | None = None, swid: str | None = None):
+    def __init__(
+        self,
+        espn_s2: str | None = None,
+        swid: str | None = None,
+        timeout: float = DEFAULT_ESPN_TIMEOUT,
+    ):
         self._espn_s2 = espn_s2
         self._swid = swid
+        self._timeout = timeout
         self._cache: dict[tuple[int, int], Any] = {}
 
     def _league(self, espn_league_id: int, season: int) -> Any:
@@ -234,17 +396,46 @@ class EspnDataSource:
         if key not in self._cache:
             from espn_api.basketball import League
 
-            self._cache[key] = League(
-                league_id=espn_league_id,
-                year=season,
-                espn_s2=self._espn_s2,
-                swid=self._swid,
-            )
+            # Before the first call that can block, and on every source since
+            # the timeout is a setting that can change under a restart-free
+            # config reload. The patch is process-wide (see the function), so
+            # the last source built wins — they all read the same setting.
+            _install_request_timeout(self._timeout)
+
+            with self._reachable():
+                self._cache[key] = League(
+                    league_id=espn_league_id,
+                    year=season,
+                    espn_s2=self._espn_s2,
+                    swid=self._swid,
+                )
         return self._cache[key]
+
+    @contextmanager
+    def _reachable(self) -> Iterator[None]:
+        """Turn a transport failure into EspnUnreachable.
+
+        requests' own exceptions are the wrong currency to hand upwards: they
+        are the detail this module exists to hide, and uncaught they surface as
+        a bare 500 on a request that was perfectly valid and an upstream that
+        was merely slow. Only transport failures are translated — an
+        ESPNAccessDenied for a bad cookie still comes through as itself,
+        because the caller can act on that one.
+        """
+        from requests import RequestException
+
+        try:
+            yield
+        except RequestException as exc:
+            raise EspnUnreachable(
+                f"ESPN did not respond within {self._timeout:g}s. It may be slow or "
+                f"down; the league's cached data is unchanged."
+            ) from exc
 
     def get_league_settings(self, espn_league_id: int, season: int) -> LeagueSettings:
         league = self._league(espn_league_id, season)
-        raw = league.espn_request.get_league()["settings"]
+        with self._reachable():
+            raw = league.espn_request.get_league()["settings"]
         return league_settings_from_raw(raw)
 
     def get_player_pool(self, espn_league_id: int, season: int) -> list[PlayerProjection]:
@@ -255,8 +446,9 @@ class EspnDataSource:
         inflate every value.
         """
         league = self._league(espn_league_id, season)
-        pool = list(league.free_agents(size=FREE_AGENT_POOL_SIZE))
-        pool += [p for team in league.teams for p in team.roster]
+        with self._reachable():
+            pool = list(league.free_agents(size=FREE_AGENT_POOL_SIZE))
+            pool += [p for team in league.teams for p in team.roster]
 
         projections: dict[int, PlayerProjection] = {}
         for p in pool:
@@ -269,6 +461,12 @@ class EspnDataSource:
                 positions=positions_of(p.eligibleSlots, getattr(p, "position", "")),
                 stats=projected_stats_of(p.stats, season),
                 pro_team=getattr(p, "proTeam", ""),
+                espn_points=espn_applied_total(p.stats, season),
+                # espn-api also exposes `injured` and `expected_return_date`.
+                # The first is redundant with this ("ACTIVE" or not) and two
+                # columns that almost always agree is the kind of pair that
+                # rots; the second was empty for all 300 players sampled.
+                injury_status=getattr(p, "injuryStatus", None),
             )
 
         # ESPN only projects the top few hundred players, so SOME empty stat
@@ -282,3 +480,60 @@ class EspnDataSource:
                 f"until then, value the prior season instead."
             )
         return list(projections.values())
+
+    def get_player_history(
+        self, espn_league_id: int, season: int, player_ids: Sequence[int]
+    ) -> dict[int, PlayerHistory]:
+        """Prior seasons' actuals for exactly these players.
+
+        Looked up by id rather than by diffing each season's pool: a pool is
+        the top few hundred by ownership, so a veteran who fell out of it would
+        read as a rookie. By id, ESPN returns every player it has for that
+        season and nobody else.
+        """
+        ids = list(player_ids)
+        if not ids:
+            return {}
+        cards = {
+            prior: self._player_cards(espn_league_id, prior, ids)
+            for prior in range(season - HISTORY_SEASONS, season)
+        }
+        return history_from_cards(cards, ids)
+
+    def _player_cards(
+        self, espn_league_id: int, season: int, player_ids: list[int]
+    ) -> list[Any] | None:
+        """One season's player cards, or None if the league has no such season.
+
+        Deliberately NOT via _league(): constructing a League fetches teams,
+        rosters and the pro schedule, ~1.3s per season that history never
+        reads. The bare request is one call, ~0.6s, for the whole pool.
+        """
+        from espn_api.basketball.player import Player
+        from espn_api.requests.espn_requests import (
+            ESPNAccessDenied,
+            EspnFantasyRequests,
+            ESPNInvalidLeague,
+        )
+
+        _install_request_timeout(self._timeout)
+        cookies = (
+            {"espn_s2": self._espn_s2, "SWID": self._swid} if self._espn_s2 and self._swid else None
+        )
+        request = EspnFantasyRequests(
+            sport="nba", year=season, league_id=espn_league_id, cookies=cookies
+        )
+        with self._reachable():
+            try:
+                # The second argument bounds per-scoring-period splits, which
+                # history never reads; the season total rides in on the
+                # "00<year>" filter espn-api always adds. ESPN rejects 0 with
+                # an HTTP 400, so 1 is the smallest request it accepts.
+                raw = request.get_player_card(player_ids, 1)["players"]
+            except (ESPNInvalidLeague, ESPNAccessDenied):
+                # The league did not exist that season, or this cookie's owner
+                # was not in it. Either way that season is unknown, which is a
+                # normal state for history rather than a failed sync — the
+                # season being synced has already been read successfully.
+                return None
+        return [Player(entry, season, {}) for entry in raw]

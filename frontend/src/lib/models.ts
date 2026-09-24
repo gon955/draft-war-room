@@ -33,6 +33,7 @@ export type Recommendation = S["RecommendationOut"];
 export type RecommendationPage = S["RecommendationPage"];
 export type Seat = S["SeatOut"];
 export type Position = S["Position"];
+export type BotValuation = S["BotValuation"];
 export type PlayerSort = S["PlayerSort"];
 
 export type PlayerPage = S["Page_PlayerWithValuationOut_"];

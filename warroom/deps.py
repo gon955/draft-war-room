@@ -101,7 +101,14 @@ def get_data_source_factory() -> PlayerDataSourceFactory:
     settings = get_settings()
 
     def factory(espn_s2: str | None = None) -> PlayerDataSource:
-        return EspnDataSource(espn_s2=espn_s2 or settings.espn_s2, swid=settings.espn_swid)
+        # timeout is not optional plumbing: espn-api sets none of its own, and
+        # these calls run in the same threadpool that serves /health. See
+        # data_source._TimeoutRequests.
+        return EspnDataSource(
+            espn_s2=espn_s2 or settings.espn_s2,
+            swid=settings.espn_swid,
+            timeout=settings.espn_timeout,
+        )
 
     return factory
 

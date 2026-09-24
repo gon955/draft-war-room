@@ -7,11 +7,27 @@
 # and the build needs a toolchain it should not have to carry.
 FROM python:3.12-slim
 
+# MALLOC_ARENA_MAX: the biggest memory lever in this image, and not a Python
+#   setting at all. glibc gives each thread its own malloc arena and does not
+#   return memory freed in one of them to the OS. Every request here runs on an
+#   AnyIO worker thread (the routes are sync `def`s) and a login allocates a
+#   ~19 MiB argon2 arena on whichever thread serves it — so after a burst each
+#   of the 32 worker threads sits on a 19 MiB hole it will never give back and
+#   rarely reuse. Measured, under the same 120 logins:
+#
+#       unset                455 MiB RSS, and it never came back down
+#       MALLOC_ARENA_MAX=2    94 MiB RSS
+#
+#   Both runs capped concurrent hashes at 4, so the whole difference is
+#   retention rather than concurrency. On the 512 MB machine fly.toml asks for,
+#   the first number is most of the budget held by memory nobody is using.
+#
 # PYTHONDONTWRITEBYTECODE: no .pyc litter in a layer that is read-only anyway.
 # PYTHONUNBUFFERED: without it Python block-buffers stdout when it is a pipe,
 #   which is exactly what a platform's log collector is — so logs arrive in
 #   4 KB bursts, or not at all when a crash loses the buffer.
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV MALLOC_ARENA_MAX=2 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1

@@ -6,6 +6,9 @@ import { api, ApiError, qs } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 import { POSITIONS } from "@/lib/models";
 import { Headshot } from "@/components/Headshot";
+import { ConfidenceLegend } from "@/components/ConfidenceLegend";
+import { InjuryTag } from "@/components/InjuryTag";
+import { confidenceAria, confidenceOf, confidenceTitle } from "@/lib/confidence";
 import type {
   Board,
   League,
@@ -216,6 +219,9 @@ function BoardView() {
                 <th className="num">Proj</th>
                 <th className="num">Repl</th>
                 <th className="num">Value</th>
+                <th className="num" title="How much of a player's projection the engine had to estimate rather than read from ESPN. Lower is better.">
+                  Conf
+                </th>
                 <th>Slot</th>
                 <th>Tier</th>
                 <th className="num">Rank</th>
@@ -238,12 +244,31 @@ function BoardView() {
                           name={item.player.name}
                         />
                         <span className="stack">{item.player.name}</span>
+                        <InjuryTag status={item.player.injury_status} />
                       </span>
                     </td>
                     <td className="muted">{item.player.positions.join("/")}</td>
                     <td className="num">{v ? v.projected_points.toFixed(1) : "—"}</td>
                     <td className="num">{v ? v.replacement_points.toFixed(1) : "—"}</td>
                     <td className="num">{v ? v.value.toFixed(1) : "—"}</td>
+                    {/* The number carries the meaning and the colour only
+                        reinforces it: a band of "±184" is legible with no
+                        colour at all, which is what makes this readable to a
+                        screen reader and to anyone who cannot separate the
+                        green from the amber. */}
+                    <td className="num">
+                      {v ? (
+                        <span
+                          className={`conf conf-${confidenceOf(v.projected_points, v.model_sd)}`}
+                          title={confidenceTitle(v.projected_points, v.model_sd)}
+                          aria-label={confidenceAria(v.projected_points, v.model_sd)}
+                        >
+                          ±{v.model_sd.toFixed(0)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="muted">{v?.assigned_slot ?? "—"}</td>
                     <td className="muted">{r?.tier_id ? (tierLabel.get(r.tier_id) ?? "?") : "—"}</td>
                     <td className="num">
@@ -291,6 +316,7 @@ function BoardView() {
               })}
             </tbody>
           </table>
+          <ConfidenceLegend />
         </div>
       </div>
 

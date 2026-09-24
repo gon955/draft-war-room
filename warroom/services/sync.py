@@ -55,6 +55,15 @@ def sync_player_pool(db: Session, league: League, source: PlayerDataSource) -> i
         raise ProjectionsUnavailable(
             f"No player projections returned for league {league.espn_league_id} in season {league.season}."
         )
+    # Same sync, not a separate job: history is keyed by the pool it
+    # describes, and fetching it here is what keeps valuation from ever
+    # having to reach ESPN. Its failure is the sync's failure — a pool
+    # silently stored without history would read as "nothing known" for
+    # everyone, which degrades every model built on it with no error.
+    history = source.get_player_history(
+        league.espn_league_id, league.season, [p.espn_player_id for p in pool]
+    )
+
     rows = [
         {
             "espn_player_id": p.espn_player_id,
@@ -63,6 +72,12 @@ def sync_player_pool(db: Session, league: League, source: PlayerDataSource) -> i
             "pro_team": p.pro_team,
             "positions": list(p.positions),
             "projections": dict(p.stats),
+            "espn_projected_points": p.espn_points,
+            "injury_status": p.injury_status,
+            # JSON object keys are strings; to_projection turns them back.
+            "history": {
+                str(season): line for season, line in history.get(p.espn_player_id, {}).items()
+            },
         }
         for p in pool
     ]
@@ -75,6 +90,9 @@ def sync_player_pool(db: Session, league: League, source: PlayerDataSource) -> i
             "pro_team": stmt.excluded.pro_team,
             "positions": stmt.excluded.positions,
             "projections": stmt.excluded.projections,
+            "espn_projected_points": stmt.excluded.espn_projected_points,
+            "injury_status": stmt.excluded.injury_status,
+            "history": stmt.excluded.history,
             # Force updated_at explicitly because standard ORM mixin hooks don't fire on Core engine upserts
             "updated_at": func.clock_timestamp(),
         },

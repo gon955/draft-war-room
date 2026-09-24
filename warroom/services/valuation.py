@@ -83,6 +83,7 @@ def to_projection(player: Player) -> PlayerProjection:
         positions=tuple(player.positions),
         stats=player.projections,
         pro_team=player.pro_team,
+        history={int(season): line for season, line in player.history.items()},
     )
 
 

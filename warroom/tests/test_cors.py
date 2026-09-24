@@ -15,6 +15,8 @@ Two failures this file is written against, both of which shipped once:
     name nobody can spell is worth a test that names the one that matters.
 """
 
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -132,3 +134,70 @@ class TestOriginRegex:
         r = preflight(preview_client, "https://evil-warroom.pages.dev")
 
         assert r.headers.get("access-control-allow-origin") != "https://evil-warroom.pages.dev"
+
+
+class TestCorsSurvivesAServerError:
+    """A 500 must reach the browser as a 500, not as a CORS failure.
+
+    This is the bug that cost real debugging time: Postgres was unreachable,
+    POST /auth/login raised, and Starlette's ServerErrorMiddleware answered 500
+    from OUTSIDE the CORS middleware — so the response had no
+    Access-Control-Allow-Origin, the browser rejected it before any JavaScript
+    saw the status, and the frontend reported "Cannot reach the API ... is this
+    origin in CORS_ORIGINS?". The API was running and CORS was configured
+    correctly. Neither fact was visible from the symptom.
+    """
+
+    @pytest.fixture
+    def exploding_client(self) -> TestClient:
+        app = create_app()
+
+        @app.get("/boom", include_in_schema=False)
+        def boom() -> None:
+            raise RuntimeError("something went wrong deep in a route")
+
+        # raise_server_exceptions=False so the TestClient behaves like a real
+        # server: return the 500 rather than re-raising into the test.
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_a_500_still_carries_the_cors_header(self, exploding_client):
+        r = exploding_client.get("/boom", headers={"Origin": ALLOWED})
+
+        assert r.status_code == 500
+        assert r.headers["access-control-allow-origin"] == ALLOWED
+
+    def test_the_body_is_json_the_frontend_can_read(self, exploding_client):
+        """api.ts reads `detail` off every error. A text/plain body makes a
+        genuine server error render as an unparseable response."""
+        r = exploding_client.get("/boom", headers={"Origin": ALLOWED})
+
+        assert r.json() == {"detail": "Internal server error"}
+
+    def test_the_exception_text_is_not_sent_to_the_browser(self, exploding_client):
+        """Exception messages here routinely carry the connection string,
+        password included, and this response is unauthenticated."""
+        r = exploding_client.get("/boom", headers={"Origin": ALLOWED})
+
+        assert "something went wrong deep in a route" not in r.text
+
+    def test_the_traceback_still_reaches_the_logs(self, exploding_client, caplog):
+        """Catching the exception takes it out of ServerErrorMiddleware's
+        hands. A readable browser error bought with a lost server traceback
+        would be a bad trade."""
+        with caplog.at_level(logging.ERROR, logger="warroom"):
+            exploding_client.get("/boom", headers={"Origin": ALLOWED})
+
+        assert any(
+            rec.exc_info and "something went wrong deep in a route" in str(rec.exc_info[1])
+            for rec in caplog.records
+        )
+
+    def test_a_disallowed_origin_gets_no_header_even_on_a_500(self, exploding_client):
+        """The fix must not turn the error path into a way round the allowlist."""
+        r = exploding_client.get("/boom", headers={"Origin": DENIED})
+
+        assert r.status_code == 500
+        assert "access-control-allow-origin" not in r.headers
+
+    def test_ordinary_responses_are_unaffected(self, client):
+        assert client.get("/health", headers={"Origin": ALLOWED}).status_code == 200

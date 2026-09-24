@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...except the template. NEXT_PUBLIC_API_URL has to be set for a production
+# build to succeed at all, so the one file that says so must be committed.
+!.env.example
 
 # vercel
 .vercel

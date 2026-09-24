@@ -29,7 +29,7 @@ from warroom.deps import CurrentUser, DataSourceFactory, DbSession
 from warroom.models import League
 from warroom.schemas.league import LeagueCreate, LeagueOut, SyncResult
 from warroom.services import sync as sync_service
-from warroom.valuation.data_source import ProjectionsUnavailable
+from warroom.valuation.data_source import EspnUnreachable, ProjectionsUnavailable
 
 router = APIRouter(prefix="/leagues", tags=["leagues"])
 
@@ -65,6 +65,17 @@ def _upstream_unavailable(league_id: int, season: int) -> HTTPException:
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=f"ESPN player projections are currently unavailable for league {league_id} season {season}.",
     )
+
+
+def _upstream_timeout(exc: EspnUnreachable) -> HTTPException:
+    """504, not 422 and not 500.
+
+    422 would say the request was wrong; it was not. 500 would say this server
+    broke; it did not. 504 says the upstream did not answer in time, which is
+    both true and retryable — and it is the one of the three that tells a
+    caller the right thing to do next.
+    """
+    return HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc))
 
 
 @router.post("", response_model=LeagueOut, status_code=status.HTTP_201_CREATED)
@@ -124,6 +135,9 @@ def create_league(
     except ProjectionsUnavailable:
         db.rollback()
         raise _upstream_unavailable(payload.espn_league_id, payload.season)
+    except EspnUnreachable as exc:
+        db.rollback()
+        raise _upstream_timeout(exc) from None
 
     return league
 
@@ -155,6 +169,9 @@ def sync_league(
     except ProjectionsUnavailable:
         db.rollback()
         raise _upstream_unavailable(league.espn_league_id, league.season)
+    except EspnUnreachable as exc:
+        db.rollback()
+        raise _upstream_timeout(exc) from None
 
     # Not league.updated_at: a re-sync whose settings are unchanged emits no
     # UPDATE on the league row, so that column reports the last settings change

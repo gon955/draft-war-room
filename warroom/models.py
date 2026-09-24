@@ -202,9 +202,31 @@ class Player(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(nullable=False)
     pro_team: Mapped[str] = mapped_column(nullable=False)
 
+    # ESPN's own projected fantasy total, scored under the league that was
+    # synced. Nullable because ESPN publishes no projection for every player it
+    # serves, and because rows written before this column existed have none —
+    # a re-sync fills them. Stored rather than derived: it is ESPN's opinion,
+    # not something recomputable from `projections`.
+    espn_projected_points: Mapped[float | None] = mapped_column(nullable=True)
+
+    # "ACTIVE", "DAY_TO_DAY" or "OUT", as ESPN last reported. Nullable: rows
+    # written before this column existed have none, and a re-sync fills them.
+    # Reference data like everything else here, so it reflects the last sync
+    # rather than this instant — which is why the UI dates it rather than
+    # presenting it as live.
+    injury_status: Mapped[str | None] = mapped_column(nullable=True)
+
     # Explicit JSONB mapping bypassing the dict-only map rule
     positions: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     projections: Mapped[dict[str, Any]] = mapped_column(nullable=False)
+
+    # Prior seasons' ACTUAL totals, {"<season>": {stat: total} | null}, fetched
+    # at sync so valuation stays offline. Raw lines on purpose: every model
+    # built on them (rebound split, uncertainty buckets, availability) can be
+    # refitted without a resync. A season key that is absent, null or {} mean
+    # three different things — see domain.PlayerHistory. '{}' for rows synced
+    # before this column existed: nothing known, until the next sync.
+    history: Mapped[dict[str, Any]] = mapped_column(nullable=False, server_default="{}")
 
     # Graph Traversal Anchors (Accidental global cache mutation must fail loudly)
     valuations: Mapped[list["Valuation"]] = relationship(back_populates="player")

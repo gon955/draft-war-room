@@ -1,6 +1,6 @@
 # Fly.io deploy config. The Dockerfile is the portable part; this file is the
-# only host-specific piece, and Railway/Render equivalents are in the README
-# section below it.
+# only host-specific piece. Railway/Render equivalents are in the README's
+# "Deploying" section.
 
 app = "warroom-api"
 
@@ -16,6 +16,17 @@ primary_region = "iad"
   # Fly does not inject PORT, so the Dockerfile's ${PORT:-8000} default would
   # apply. Setting it explicitly keeps this file and internal_port in one place.
   PORT = "8080"
+
+  # Off in production: /docs and /openapi.json publish every route, parameter
+  # and schema in the app. The frontend needs neither — its types are generated
+  # from the document in CI, at build time, not read from the live server.
+  DOCS_ENABLED = "false"
+
+  # NOT set here, and they must be set with `fly secrets set`:
+  #   DATABASE_URL   JWT_SECRET   FERNET_KEY   ESPN_S2   ESPN_SWID
+  # [env] values are baked into the image metadata and readable by anyone who
+  # can inspect it. CORS_ORIGINS is not a secret but is deployment-specific;
+  # see the README.
 
 [deploy]
   # Runs `alembic upgrade head` in a ONE-OFF machine from the new image, and
@@ -36,23 +47,61 @@ primary_region = "iad"
   min_machines_running = 0
 
   [http_service.concurrency]
+    # Matched to REQUEST_THREAD_LIMIT (config.py, default 32), which is the real
+    # concurrency of the process: every route is a sync `def`, so each in-flight
+    # request occupies one AnyIO worker thread. Admitting more than that does
+    # not serve more — it queues them inside the process, where the proxy can no
+    # longer see the backlog and route around it. The previous 40/80 was exactly
+    # that: double the capacity, invisible.
     type = "requests"
-    soft_limit = 40
-    hard_limit = 80
+    soft_limit = 20
+    hard_limit = 32
 
   [[http_service.checks]]
-    # /health is the one route that touches neither auth nor the database, so a
-    # failing check means the process is down rather than Postgres being slow.
+    # /health, not /ready, and the choice matters.
+    #
+    # /health touches nothing but the process, so a failure means the process
+    # itself is wedged — worth a restart. /ready runs SELECT 1, so it also fails
+    # when Postgres is unreachable, and restarting an app machine does not fix
+    # Postgres: with every machine sharing one database they would all fail
+    # together, all restart together, and the outage would gain a crash loop on
+    # top of it.
+    #
+    # /ready is for MONITORING — point an alert at it to tell "the database is
+    # gone" apart from "the app is gone", which is the one distinction a
+    # liveness check cannot make. It also belongs on a load-balancer readiness
+    # check in a topology where machines can lose their database independently.
+    # This one cannot.
     path = "/health"
     method = "GET"
     interval = "30s"
-    timeout = "5s"
+    # 10s, not 5s — headroom kept deliberately after the cost came down.
+    #
+    # A full-draft POST /mocks/{id}/simulate used to be 5.3s of pure Python,
+    # and three concurrent ones pushed /health from 50ms to 1.3s. engine.py's
+    # seating and eligibility fixes took that to 0.43s, with /health staying
+    # under 75ms under the same load. 5s would now be survivable; 10s is kept
+    # because the failure it guards against is the platform restarting a
+    # machine MID-DRAFT over load rather than a fault, and the only cost of the
+    # wider margin is noticing a genuinely wedged process one interval later.
+    timeout = "10s"
     grace_period = "10s"
 
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  # 512 MB, not 256: argon2id is configured at m=65536, so EVERY login or
-  # registration allocates 64 MB by design. Two concurrent logins on a 256 MB
-  # machine plus the interpreter is an OOM kill that looks like a random 502.
+  # 512 MB, and the number that decides it is argon2's memory.
+  #
+  # passlib's argon2 defaults are m=65536 KiB (64 MiB) per hash, with nothing
+  # bounding how many run at once: 20 concurrent unauthenticated POSTs to
+  # /auth/login measured at 899 MiB RSS — an OOM kill from anyone with curl and
+  # no account. config.py now sets m=19456 (OWASP) and caps concurrency at 4,
+  # and the Dockerfile sets MALLOC_ARENA_MAX=2 so freed arenas are handed back
+  # instead of parked per worker thread. The same load now peaks at 94 MiB.
+  #
+  # Neither fix alone was enough: with the concurrency cap but WITHOUT the
+  # arena limit the same run settled at 455 MiB and never came back down.
+  #
+  # Raising PASSWORD_HASH_CONCURRENCY or ARGON2_MEMORY_KIB, or dropping
+  # MALLOC_ARENA_MAX, is the way back to that OOM.
   memory = "512mb"

@@ -6,6 +6,7 @@
   --dim: #8b93a7;
   --acc: #6ea8fe;
   --ok: #4ec9a5;
+  --warn: #e0b055;
   --bad: #e86a6a;
   --mine: #3a3050;
   color-scheme: dark;
@@ -67,8 +68,25 @@ tr.mine td { background: var(--mine); }
 .scroll { max-height: 520px; overflow: auto; }
 .muted { color: var(--dim); font-size: 12px; }
 .error { color: var(--bad); font-size: 13px; margin: 6px 0 0; }
+/* Confidence on the board: how much of a valuation is estimated rather than
+   projected. Colour is redundant here by design — the cell already shows the
+   band in points, so the hue only speeds up scanning and never carries
+   meaning on its own. `help` cursor advertises the tooltip, which is where the
+   actual explanation lives. */
+.conf { cursor: help; }
+.conf-high { color: var(--ok); }
+.conf-medium { color: var(--warn); }
+.conf-low { color: var(--bad); }
+.conf-unknown { color: var(--dim); }
+.legend { margin: 10px 0 0; line-height: 1.5; }
+.legend .conf { cursor: default; font-family: var(--font-geist-mono), monospace; }
+
 .tag { font-size: 11px; padding: 1px 6px; border-radius: 3px; background: #232838; color: var(--dim); }
 .tag.t { background: #1e3a2e; color: var(--ok); }
+/* Injury flags. OUT reads as a stop; DTD as a caution, not a warning — most
+   day-to-day players play. */
+.tag.inj-out { background: #3a2429; color: #f0b6b6; font-weight: 600; }
+.tag.inj-dtd { background: #3a3324; color: var(--warn); }
 .tag.a { background: #3a2429; color: #f0b6b6; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }

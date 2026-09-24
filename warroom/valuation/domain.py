@@ -9,6 +9,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# One completed season's ACTUAL totals, keyed by lowercase stat code like
+# PlayerProjection.stats ("gp", "min", "oreb", "dreb", "dd", ...). Raw lines
+# rather than anything derived from them, so a model fitted on history can be
+# refitted without refetching it.
+SeasonLine = dict[str, float]
+
+# A player's completed seasons before the one being valued, keyed by season.
+# The three states are distinct and every consumer needs to tell them apart:
+#
+#   key absent      that season was not fetched (the league did not exist yet,
+#                   or history has never been synced) — nothing is known
+#   value None      fetched, and ESPN had no record of this player: not in the
+#                   NBA that season. How a rookie is identified.
+#   value {}        ESPN lists the player but has no stat line: a whole season
+#                   lost to injury (Haliburton, 2026) — which an availability
+#                   model must not mistake for a rookie — but also a season
+#                   played abroad while still listed (Lyles, 2026). A zero-
+#                   games season is not proof of injury on its own.
+PlayerHistory = dict[int, SeasonLine | None]
+
 
 @dataclass(frozen=True)
 class PlayerProjection:
@@ -24,6 +44,27 @@ class PlayerProjection:
     positions: tuple[str, ...]
     stats: dict[str, float]
     pro_team: str = ""
+    # ESPN's OWN projected fantasy total for this player, already scored under
+    # this league's settings (their `appliedTotal`). It arrives in the same
+    # payload as `stats` and is a genuinely different opinion, not a rederivation
+    # of it: ESPN projects the stats it does not publish rather than leaving
+    # them out, so this number includes rebounding splits and double-doubles
+    # that stats.py has to estimate. Optional because a fake source, a hand-built
+    # projection and a pool synced before this field existed all lack it.
+    espn_points: float | None = None
+    # ESPN's injury flag: "ACTIVE", "DAY_TO_DAY" or "OUT" (None when the feed
+    # says nothing). Carried because it is decision-relevant at the draft and
+    # arrives free in the same payload — a player who is OUT is worth knowing
+    # about before you spend a pick, whatever their projection says.
+    #
+    # It deliberately does NOT feed the valuation. ESPN's own projection
+    # already embeds their view of games missed, so discounting a second time
+    # here would double-count; see the README's availability note.
+    injury_status: str | None = None
+    # Prior seasons' actuals, fetched at sync so valuation never has to go
+    # back to ESPN. Empty when history has not been synced, which every
+    # consumer must treat as "unknown", never as "rookie" — see PlayerHistory.
+    history: PlayerHistory = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -578,6 +578,108 @@ def lineup_values_by_mask(
     return best
 
 
+def _best_seating(table: Sequence[float], seat_count: int, without: int | None = None) -> float:
+    """The best lineup value that seats AS MANY PLAYERS AS POSSIBLE.
+
+    Not max(table), and the difference is a bug that only shows once values go
+    negative — which they do for everyone from the middle rounds on, because a
+    value is measured over a replacement level that keeps rising.
+
+    max(table) picks the best value over any SUBSET of seats, so a starter
+    whose value has gone negative is "better left out": the optimiser prefers
+    the smaller mask and reports the seat as empty. Two things then break.
+    Your lineup is undervalued, because a fantasy lineup cannot leave a seat
+    empty — an empty seat scores nothing, while a negative-VALUE player still
+    scores positive POINTS, so starting them is always better. And the seat
+    reads as unoccupied, so every candidate eligible for it appears to add
+    their whole value rather than the difference over the incumbent. That is
+    what made a sixth centre look as valuable as a first.
+
+    Maximising cardinality first and value second fixes both and preserves the
+    behaviour lineup_values_by_mask was written for: with PG:1 and UTIL:1 and
+    two good guards plus a weak centre, seating two players is the maximum
+    either way, so the tie is broken on value and both guards start.
+    """
+    best_count = -1
+    best_value = float("-inf")
+    for mask, value in enumerate(table):
+        if value == float("-inf"):
+            continue
+        if without is not None and mask & (1 << without):
+            continue
+        count = mask.bit_count()
+        if count > best_count or (count == best_count and value > best_value):
+            best_count, best_value = count, value
+    return best_value if best_value != float("-inf") else 0.0
+
+
+def lineup_deltas(
+    candidates: Iterable[LiveValue],
+    roster: Iterable[PlayerProjection],
+    settings: LeagueSettings,
+    replacement: Mapping[str, float],
+    bench: float,
+    points: Mapping[int, float],
+    eligibility: Eligibility = default_slot_eligibility,
+) -> dict[int, float]:
+    """SIGNED change to your best lineup from adding each candidate.
+
+    Positive means they would start for you. Negative means they would not, and
+    HOW negative is the number that makes a bench round legible: it is the gap
+    between this player and the starter they would have to displace. A backup
+    at a position where you are one deep sits just under your starter; a fifth
+    centre sits a long way under your third.
+
+    marginal_values clamps this at zero, which is right for display — "adds
+    nothing to your lineup" is the honest summary, and a negative "Adds" column
+    would read as a penalty. But the clamp destroys the ordering, and from the
+    moment your lineup fills, EVERY candidate clamps to zero. Ranking then fell
+    through to a league-wide number that knows nothing about your roster, which
+    in a rebound-heavy league means centres, for ever. Hence this: same
+    computation, kept signed, for the caller that needs to sort rather than
+    show.
+    """
+    seats = seat_slots(settings)
+    weighted = [
+        (p, _valuation_of(p, replacement, bench, points, eligibility).value) for p in roster
+    ]
+
+    if len(seats) > MAX_SEATS_FOR_EXACT_LINEUP:
+        # Degrade to "does it fill an open seat", rather than hang. No lineup
+        # table here, so there is no incumbent to measure against and the
+        # signed and clamped answers coincide.
+        open_ = open_slots([p for p, _ in weighted], settings, eligibility)
+        return {
+            c.value.player.espn_player_id: (
+                c.value.value
+                if any(eligibility(s, c.value.player.positions) for s in open_)
+                else 0.0
+            )
+            for c in candidates
+        }
+
+    table = lineup_values_by_mask(weighted, seats, eligibility)
+    full = _best_seating(table, len(seats))
+
+    # Best lineup the roster can manage while leaving each seat free for the
+    # candidate. Computed once for all seats, then read per candidate.
+    without_seat = [_best_seating(table, len(seats), without=i) for i in range(len(seats))]
+
+    out: dict[int, float] = {}
+    for candidate in candidates:
+        player = candidate.value.player
+        best_with = max(
+            (
+                candidate.value.value + without_seat[i]
+                for i in range(len(seats))
+                if eligibility(seats[i], player.positions)
+            ),
+            default=float("-inf"),
+        )
+        out[player.espn_player_id] = best_with - full
+    return out
+
+
 def marginal_values(
     candidates: Iterable[LiveValue],
     roster: Iterable[PlayerProjection],
@@ -593,47 +695,16 @@ def marginal_values(
     worth zero to the lineup rather than a penalty. A 0.0 here is the useful
     signal — it means every seat this player fits is already held by someone
     better, so drafting them buys depth and nothing else.
+
+    The clamp of lineup_deltas. Anything that needs to ORDER the players this
+    returns 0.0 for wants that function instead.
     """
-    seats = seat_slots(settings)
-    weighted = [
-        (p, _valuation_of(p, replacement, bench, points, eligibility).value) for p in roster
-    ]
-
-    if len(seats) > MAX_SEATS_FOR_EXACT_LINEUP:
-        # Degrade to "does it fill an open seat", rather than hang.
-        open_ = open_slots([p for p, _ in weighted], settings, eligibility)
-        return {
-            c.value.player.espn_player_id: (
-                c.value.value
-                if any(eligibility(s, c.value.player.positions) for s in open_)
-                else 0.0
-            )
-            for c in candidates
-        }
-
-    table = lineup_values_by_mask(weighted, seats, eligibility)
-    full = max(table)
-
-    # Best lineup the roster can manage while leaving each seat free for the
-    # candidate. Computed once for all seats, then read per candidate.
-    without_seat = []
-    for i in range(len(seats)):
-        bit = 1 << i
-        without_seat.append(max(v for mask, v in enumerate(table) if not mask & bit))
-
-    out: dict[int, float] = {}
-    for candidate in candidates:
-        player = candidate.value.player
-        best_with = max(
-            (
-                candidate.value.value + without_seat[i]
-                for i in range(len(seats))
-                if eligibility(seats[i], player.positions)
-            ),
-            default=float("-inf"),
-        )
-        out[player.espn_player_id] = max(0.0, best_with - full)
-    return out
+    return {
+        pid: max(0.0, delta)
+        for pid, delta in lineup_deltas(
+            candidates, roster, settings, replacement, bench, points, eligibility
+        ).items()
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -678,12 +749,52 @@ def picks_until_next(
     return [upcoming[i][1] for i in range(mine[0] + 1, mine[1])]
 
 
+def field_order(
+    ranked: Sequence[LiveValue],
+    market_rank: Mapping[int, int] | None,
+    market_weight: float,
+) -> list[LiveValue]:
+    """The board as the ROOM sees it, not as this app does.
+
+    `ranked` arrives in our own value order, and using that to predict what
+    other managers will take assumes they share our opinion. They do not — that
+    is the entire premise of the app. The error is not random either: it is
+    largest for exactly the players we rate above the market, which are the
+    players the recommendation is telling you to target. Their survival was
+    being systematically UNDER-stated, so the board urged you to reach for
+    someone nobody else wanted.
+
+    `market_rank` maps espn_player_id to a position on the market's board (we
+    use ESPN's own projected total). `market_weight` blends the two orderings:
+    1.0 trusts the market completely, 0.0 restores the old behaviour, and in
+    between is for a room that is only partly ESPN-driven. A player the market
+    has no opinion on keeps their position on our board rather than being
+    dumped at the end, which would claim they are certain to survive.
+    """
+    if not market_rank or market_weight <= 0.0:
+        return list(ranked)
+
+    ours = {c.value.player.espn_player_id: i for i, c in enumerate(ranked)}
+
+    def key(candidate: LiveValue) -> tuple[float, int]:
+        pid = candidate.value.player.espn_player_id
+        mine = ours[pid]
+        theirs = market_rank.get(pid)
+        if theirs is None:
+            return (float(mine), pid)
+        return ((1.0 - market_weight) * mine + market_weight * theirs, pid)
+
+    return sorted(ranked, key=key)
+
+
 def survival_probabilities(
     ranked: Sequence[LiveValue],
     opponents: Sequence[Sequence[PlayerProjection]],
     settings: LeagueSettings,
     spread: float = DEFAULT_FIELD_SPREAD,
     eligibility: Eligibility = default_slot_eligibility,
+    market_rank: Mapping[int, int] | None = None,
+    market_weight: float = 1.0,
 ) -> dict[int, float]:
     """P(each candidate is still on the board when you pick again).
 
@@ -693,23 +804,34 @@ def survival_probabilities(
     rather than a countdown: nine teams that all still need a centre are a
     very different threat to your centre than nine teams that do not.
 
-    Each team's interest decays exponentially with a player's rank on that
-    team's own board, and the picks are then treated as independent.
-    Independence is the approximation: in truth an early pick removes a
-    competitor and reshuffles the later boards. It errs toward saying players
-    survive slightly more often than they do, and the alternative — simulating
-    the intervening picks repeatedly — costs seconds per request rather than
-    milliseconds.
+    Each team's interest decays exponentially with a player's rank on THE
+    MARKET's board (see field_order — this used to be our own, which is a
+    different and wrong question), and the picks are then treated as
+    independent. Independence is the approximation: in truth an early pick
+    removes a competitor and reshuffles the later boards. It errs toward saying
+    players survive slightly more often than they do, and the alternative —
+    simulating the intervening picks repeatedly — costs seconds per request
+    rather than milliseconds.
+
+    Which seats each opponent still needs is read off OUR eligibility rules
+    either way. That part is not an opinion about value, it is the roster
+    shape, and it is the same for everyone in the league.
     """
     survival = {c.value.player.espn_player_id: 1.0 for c in ranked}
     if not ranked:
         return survival
 
+    as_the_room_sees_it = field_order(ranked, market_rank, market_weight)
+
     for roster in opponents:
         needed = open_slots(roster, settings, eligibility)
-        pool = [c for c in ranked if any(eligibility(s, c.value.player.positions) for s in needed)]
+        pool = [
+            c
+            for c in as_the_room_sees_it
+            if any(eligibility(s, c.value.player.positions) for s in needed)
+        ]
         if not pool:
-            pool = list(ranked)
+            pool = list(as_the_room_sees_it)
 
         weights = [math.exp(-rank / spread) for rank in range(len(pool))]
         total = sum(weights)
