@@ -1,11 +1,18 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Big_Shoulders_Stencil, Chakra_Petch, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth";
 import Nav from "@/components/Nav";
 
-const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
-const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+// Three faces, three jobs: stencil for headings and big numerals, Chakra Petch
+// for reading, JetBrains Mono for every figure that has to line up.
+const stencil = Big_Shoulders_Stencil({ variable: "--font-stencil", subsets: ["latin"] });
+const body = Chakra_Petch({
+  variable: "--font-body",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
+const mono = JetBrains_Mono({ variable: "--font-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Draft War Room",
@@ -16,11 +23,11 @@ export const metadata: Metadata = {
 // client ones, so the static export still prerenders the shell.
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" className={`${stencil.variable} ${body.variable} ${mono.variable}`}>
       <body>
         <AuthProvider>
           <Nav />
-          <div className="wrap">{children}</div>
+          <main className="wrap">{children}</main>
         </AuthProvider>
       </body>
     </html>

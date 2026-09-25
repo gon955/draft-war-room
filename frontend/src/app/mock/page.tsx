@@ -18,6 +18,7 @@ import type {
 import { Headshot } from "@/components/Headshot";
 import { ConfidenceLegend } from "@/components/ConfidenceLegend";
 import { InjuryTag } from "@/components/InjuryTag";
+import { Loading, Meter, OpHeader, Panel, Readout, pad } from "@/components/Hud";
 import { confidenceAria, confidenceOf, confidenceTitle } from "@/lib/confidence";
 
 function MockView() {
@@ -135,145 +136,239 @@ function MockView() {
 
   const tierOf = new Map(tiers.map((t) => [t.id, t]));
 
-  if (!ready || !token) return <p className="muted">Loading…</p>;
+  if (!ready || !token) return <Loading />;
   if (!mockId) return <p className="error">No mock id. Pick one from the board.</p>;
+
+  // Who is on the clock is the first unfilled pick — the same rule `draft`
+  // uses to decide where a click lands.
+  const onClock = picks.find((p) => p.player_id === null);
+  const myNext = picks.find((p) => p.player_id === null && p.is_mine);
+  const made = picks.filter((p) => p.player_id !== null).length;
+  const complete = picks.length > 0 && !onClock;
+  const mineUp = onClock?.is_mine ?? false;
+  const startersFilled = lineup ? lineup.starters.filter((s) => s.player).length : 0;
 
   return (
     <>
+      <OpHeader
+        kicker={["Ops", "Mock draft", mock ? `slot ${pad(mock.my_draft_slot)}` : "live"]}
+        title={mock ? mock.name : "Mock draft"}
+        side={
+          boardId && (
+            <a className="btn" href={`/board?id=${boardId}`}>
+              ← Back to board
+            </a>
+          )
+        }
+      />
+
       {error && <p className="error">{error}</p>}
 
-      <div className="card">
-        <h2>{mock ? mock.name : "Mock draft"}</h2>
-        <div className="body">
-          <div className="row">
-            <label>Position</label>
-            <select value={position} onChange={(e) => setPosition(e.target.value as Position | "")}>
-              <option value="">any</option>
-              {POSITIONS.map((p) => (
-                <option key={p} value={p}>{p}</option>
-              ))}
-            </select>
-            {boardId && (
-              <a href={`/board?id=${boardId}`} className="muted">
-                ← back to board
-              </a>
-            )}
-            <label>Bots draft on</label>
-            <select
-              value={bots}
-              onChange={(e) => setBots(e.target.value as BotValuation)}
-              title={
-                "Whose valuation the simulated teams use. Position scarcity and roster fit " +
-                "apply either way — they are computed FROM these numbers — so this changes " +
-                "who the room thinks is good, not how it drafts.\n\n" +
-                "ESPN is the more realistic rehearsal: your leaguemates are reading ESPN's " +
-                "ranking, not yours, which is what makes a player slide."
-              }
-            >
-              <option value="engine">our valuation</option>
-              <option value="espn">ESPN&rsquo;s valuation</option>
-            </select>
-            <button className="primary" disabled={busy} onClick={runSim}>
-              {busy ? "simulating…" : "simulate to my pick"}
-            </button>
-            <span style={{ marginLeft: "auto" }} className="muted">
-              {mock ? `${mock.picks_made} of ${mock.picks_total} picks made` : ""}
-              {mock ? ` · your slot ${mock.my_draft_slot}` : ""}
-            </span>
-          </div>
-
-          {lastSim && (
-            <p className="muted" style={{ margin: "10px 0 0" }}>
-              {lastSim.picks.length === 0
-                ? lastSim.board_complete
-                  ? "Board complete."
-                  : "It's your pick — nothing to simulate."
-                : `Simulated ${lastSim.picks.length} pick${lastSim.picks.length === 1 ? "" : "s"} on ${bots === "espn" ? "ESPN's" : "our"} valuation: ` +
-                  lastSim.picks.map((p) => `${p.player.name} (slot ${p.team_slot})`).join(", ") +
-                  (lastSim.next_pick_number ? ` · you're on the clock at ${lastSim.next_pick_number}.` : "")}
-            </p>
-          )}
-        </div>
+      <div className="readouts">
+        <Readout
+          label="Picks made"
+          value={made}
+          unit={`/${picks.length}`}
+          meter={picks.length ? made / picks.length : 0}
+          tone="amber"
+        />
+        <Readout
+          label="Starters"
+          value={startersFilled}
+          unit={lineup ? `/${lineup.starters.length}` : undefined}
+          meter={lineup && lineup.starters.length ? startersFilled / lineup.starters.length : 0}
+          tone="go"
+        />
+        <Readout
+          label="Your next pick"
+          value={myNext ? `#${myNext.pick_number}` : "—"}
+          sub={myNext ? `round ${myNext.round}` : complete ? "draft complete" : "no picks left"}
+        />
+        <Readout label="Pool remaining" value={best?.total ?? "—"} sub="undrafted, valued" />
+        <Readout
+          label="Picks left"
+          value={lineup ? pad(lineup.picks_remaining) : "—"}
+          sub={lineup ? `bench ${lineup.bench.length}/${lineup.bench_size}` : undefined}
+        />
       </div>
 
-      {lineup && (
-        <div className="card">
-          <h2>
-            Your lineup{" "}
-            <span className="muted" style={{ fontWeight: 400 }}>
-              {lineup.picks_made} of {lineup.roster_size} rostered ·{" "}
-              {lineup.starters.filter((s) => s.player).length} of {lineup.starters.length}{" "}
-              starting slots filled · {lineup.picks_remaining} picks left
-            </span>
-          </h2>
-          <div className="body">
-            <div className="seats">
-              {lineup.starters.map((seat, i) => (
-                <div
-                  key={`${seat.slot}-${seat.index}-${i}`}
-                  className={seat.player ? "seat" : "seat empty"}
+      <Panel code="SEC-01" title="The clock" hot={mineUp}>
+        <div className="clock">
+          <div className={complete ? "radar done" : mineUp ? "radar" : "radar idle"}>
+            <div className="radar-num">
+              {complete ? "✓" : onClock ? onClock.pick_number : "—"}
+              <small>{complete ? "final" : onClock ? `rd ${onClock.round}` : ""}</small>
+            </div>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div className={mineUp ? "clock-status hot" : "clock-status idle"}>
+              {complete ? "Board complete" : mineUp ? "You are on the clock" : "The room is picking"}
+            </div>
+            <div className="clock-line">
+              {complete ? (
+                "Every pick is in. Your lineup is below."
+              ) : mineUp ? (
+                <>
+                  Pick <b>#{onClock?.pick_number}</b> is yours — draft from the recommendation below.
+                </>
+              ) : onClock ? (
+                <>
+                  Team <b>{onClock.team_slot}</b> is up at pick <b>#{onClock.pick_number}</b>
+                  {best ? (
+                    <>
+                      {" "}
+                      · <b>{best.picks_until_next}</b> pick{best.picks_until_next === 1 ? "" : "s"} until
+                      yours
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                "Loading the board…"
+              )}
+            </div>
+            <Meter value={picks.length ? made / picks.length : 0} />
+            <div className="row">
+              <div className="field">
+                <label htmlFor="bots">Bots draft on</label>
+                <select
+                  id="bots"
+                  value={bots}
+                  onChange={(e) => setBots(e.target.value as BotValuation)}
+                  title={
+                    "Whose valuation the simulated teams use. Position scarcity and roster fit " +
+                    "apply either way — they are computed FROM these numbers — so this changes " +
+                    "who the room thinks is good, not how it drafts.\n\n" +
+                    "ESPN is the more realistic rehearsal: your leaguemates are reading ESPN's " +
+                    "ranking, not yours, which is what makes a player slide."
+                  }
                 >
-                  <span className="seat-slot">{seat.slot}</span>
-                  {seat.player ? (
-                    <span className="player-cell">
-                      <Headshot
-                        espnPlayerId={seat.player.espn_player_id}
-                        name={seat.player.name}
-                        size={24}
-                      />
-                      <span className="stack">
-                        <span className="seat-name">{seat.player.name}</span>
-                        <span className="muted">{seat.player.positions.join("/")}</span>
-                      </span>
+                  <option value="engine">our valuation</option>
+                  <option value="espn">ESPN&rsquo;s valuation</option>
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="pos">Filter position</label>
+                <select id="pos" value={position} onChange={(e) => setPosition(e.target.value as Position | "")}>
+                  <option value="">any</option>
+                  {POSITIONS.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+              <button className="primary big" disabled={busy || complete} onClick={runSim} style={{ alignSelf: "flex-end" }}>
+                {busy ? "Simulating…" : "Simulate to my pick"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {lastSim && (
+          <div className="sitrep" role="status">
+            <div className="sitrep-head">
+              Sitrep · {lastSim.picks.length} pick{lastSim.picks.length === 1 ? "" : "s"} on{" "}
+              {bots === "espn" ? "ESPN's" : "our"} valuation
+            </div>
+            {lastSim.picks.length === 0 ? (
+              <div>{lastSim.board_complete ? "Board complete." : "It's your pick — nothing to simulate."}</div>
+            ) : (
+              <ol>
+                {lastSim.picks.map((p) => (
+                  <li key={p.pick_number}>
+                    <span>#{pad(p.pick_number, 3)} T{pad(p.team_slot)}</span>
+                    {p.player.name}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {lastSim.next_pick_number ? (
+              <div className="sitrep-foot">▶ You&rsquo;re on the clock at #{lastSim.next_pick_number}.</div>
+            ) : null}
+          </div>
+        )}
+      </Panel>
+
+      {lineup && (
+        <Panel
+          code="SEC-02"
+          title="Your lineup"
+          meta={
+            <>
+              <span>
+                {lineup.picks_made} of {lineup.roster_size} rostered
+              </span>
+              <span>
+                {startersFilled} of {lineup.starters.length} starters
+              </span>
+              <span>{lineup.picks_remaining} picks left</span>
+            </>
+          }
+        >
+          <div className="seats">
+            {lineup.starters.map((seat, i) => (
+              <div key={`${seat.slot}-${seat.index}-${i}`} className={seat.player ? "seat" : "seat empty"}>
+                <span className="seat-slot">{seat.slot}</span>
+                {seat.player ? (
+                  <span className="player-cell">
+                    <Headshot espnPlayerId={seat.player.espn_player_id} name={seat.player.name} size={32} />
+                    <span className="stack">
+                      <span className="seat-name">{seat.player.name}</span>
+                      <span className="muted">{seat.player.positions.join("/")}</span>
                     </span>
-                  ) : (
-                    <span className="muted seat-name">needs a player</span>
-                  )}
+                  </span>
+                ) : (
+                  <span className="seat-open">Open seat</span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* bench_size is roster_size minus the starting slots, which the
+              API derives — roster_slots counts starters only. */}
+          <div className="subhead">
+            Bench · {lineup.bench.length} of {lineup.bench_size}
+          </div>
+          {lineup.bench.length === 0 ? (
+            <p className="muted" style={{ margin: 0 }}>
+              Nobody on the bench yet.
+            </p>
+          ) : (
+            <div className="seats">
+              {lineup.bench.map((p) => (
+                <div key={p.id} className="seat bench">
+                  <span className="seat-slot">BE</span>
+                  <span className="player-cell">
+                    <Headshot espnPlayerId={p.espn_player_id} name={p.name} size={32} />
+                    <span className="stack">
+                      <span className="seat-name">{p.name}</span>
+                      <span className="muted">{p.positions.join("/")}</span>
+                    </span>
+                  </span>
                 </div>
               ))}
             </div>
-
-            <p className="muted" style={{ margin: "14px 0 6px" }}>
-              {/* bench_size is roster_size minus the starting slots, which the
-                  API derives — roster_slots counts starters only. */}
-              Bench · {lineup.bench.length} of {lineup.bench_size}
-            </p>
-            {lineup.bench.length === 0 ? (
-              <p className="muted" style={{ margin: 0 }}>
-                Nobody on the bench yet.
-              </p>
-            ) : (
-              <div className="seats">
-                {lineup.bench.map((p) => (
-                  <div key={p.id} className="seat bench">
-                    <span className="seat-slot">BE</span>
-                    <span className="player-cell">
-                      <Headshot espnPlayerId={p.espn_player_id} name={p.name} size={24} />
-                      <span className="stack">
-                        <span className="seat-name">{p.name}</span>
-                        <span className="muted">{p.positions.join("/")}</span>
-                      </span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+          )}
+        </Panel>
       )}
 
       <div className="grid2">
-        <div className="card">
-          <h2>Best available</h2>
-          <div className="body scroll">
-            <p className="muted" style={{ marginTop: 0 }}>
+        <Panel
+          code="SEC-03"
+          title="Recommendation"
+          hot={mineUp}
+          flush
+          meta={
+            <span>
               {best?.total ?? 0} left ·{" "}
               {best
                 ? best.picks_until_next === 0
-                  ? "you pick again immediately — nothing can be taken"
-                  : `${best.picks_until_next} pick${best.picks_until_next === 1 ? "" : "s"} until your next turn`
+                  ? "you pick again immediately"
+                  : `${best.picks_until_next} until your turn`
                 : ""}
-            </p>
+            </span>
+          }
+          foot={<ConfidenceLegend />}
+        >
+          <div className="scroll">
             <table>
               <thead>
                 <tr>
@@ -283,7 +378,7 @@ function MockView() {
                   {/* "My rank", not "Rank": user_rank is an override that is
                       null until you move somebody, so a blank cell here means
                       "engine order", not "missing data". */}
-                  <th className="num">My rank</th>
+                  <th className="num">My rk</th>
                   {/* Value is the league-wide VOR; Adds is that value filtered
                       through your own seats. They agree until your roster
                       starts constraining you. */}
@@ -309,129 +404,145 @@ function MockView() {
               </thead>
               <tbody>
                 {best?.items.map((item) => {
-                  const tier = item.ranking?.tier_id
-                    ? tierOf.get(item.ranking.tier_id)
-                    : undefined;
+                  const tier = item.ranking?.tier_id ? tierOf.get(item.ranking.tier_id) : undefined;
+                  const rowClass = item.ranking?.is_avoid
+                    ? "is-avoid"
+                    : item.ranking?.is_target
+                      ? "is-target"
+                      : undefined;
+                  const lasts = item.survival;
                   return (
-                  <tr key={item.player.id}>
-                    <td>
-                      <span className="player-cell">
-                        <Headshot
-                          espnPlayerId={item.player.espn_player_id}
-                          name={item.player.name}
-                        />
-                        <span className="stack">
-                          {item.player.name}{" "}
-                          <InjuryTag status={item.player.injury_status} />{" "}
-                          {item.ranking?.is_target && <span className="tag t">T</span>}
-                          {item.ranking?.is_avoid && <span className="tag a">A</span>}
-                          {item.ranking?.note && (
-                            <div className="muted">{item.ranking.note}</div>
-                          )}
+                    <tr key={item.player.id} className={rowClass}>
+                      <td>
+                        <span className="player-cell">
+                          <Headshot espnPlayerId={item.player.espn_player_id} name={item.player.name} size={32} />
+                          <span className="stack">
+                            <span className="pname">{item.player.name}</span>
+                            <span className="tags">
+                              <InjuryTag status={item.player.injury_status} />
+                              {item.ranking?.is_target && <span className="tag t">▲ TGT</span>}
+                              {item.ranking?.is_avoid && <span className="tag a">✕ AVD</span>}
+                            </span>
+                            {item.ranking?.note && <span className="pnote">{item.ranking.note}</span>}
+                          </span>
                         </span>
-                      </span>
-                    </td>
-                    <td className="muted">{item.player.positions.join("/")}</td>
-                    <td>
-                      {tier ? (
-                        <span
-                          className="tag"
-                          style={tier.color ? { background: tier.color } : undefined}
-                        >
-                          {tier.label}
+                      </td>
+                      <td className="pos">{item.player.positions.join("/")}</td>
+                      <td>
+                        {tier ? (
+                          <span
+                            className="tag tier"
+                            style={tier.color ? { background: tier.color, borderColor: tier.color } : undefined}
+                          >
+                            {tier.label}
+                          </span>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                      <td className="num muted">{item.ranking?.user_rank ?? "—"}</td>
+                      <td className="num">{item.live.value.toFixed(1)}</td>
+                      {/* "bench" used to be the whole story here, and it hid the
+                          ordering: once your lineup is full every candidate adds
+                          0.0, so the column read the same for all of them while
+                          the list was in some order the column could not
+                          explain. lineup_delta is that order — how far short of
+                          the starter they would displace each one falls. */}
+                      <td className={item.improves_lineup ? "num pos-delta" : "num muted"}>
+                        {item.improves_lineup ? (
+                          `+${item.marginal_value.toFixed(1)}`
+                        ) : item.fills_open_seat ? (
+                          "fills seat"
+                        ) : (
+                          <span
+                            title={
+                              `${Math.abs(item.lineup_delta).toFixed(0)} short of the starter ` +
+                              `they would have to displace. Bench depth, but this is how close ` +
+                              `they come — and it is what orders the board once your lineup is full.`
+                            }
+                          >
+                            {item.lineup_delta.toFixed(0)}
+                          </span>
+                        )}
+                      </td>
+                      <td className="num">
+                        <span className="meter-cell">
+                          <Meter value={lasts} tone={lasts >= 0.7 ? "go" : lasts >= 0.35 ? "caution" : "signal"} />
+                          <span className="muted">{`${Math.round(lasts * 100)}%`}</span>
                         </span>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                    <td className="num">{item.ranking?.user_rank ?? "—"}</td>
-                    <td className="num">{item.live.value.toFixed(1)}</td>
-                    {/* "bench" used to be the whole story here, and it hid the
-                        ordering: once your lineup is full every candidate adds
-                        0.0, so the column read the same for all of them while
-                        the list was in some order the column could not
-                        explain. lineup_delta is that order — how far short of
-                        the starter they would displace each one falls. */}
-                    <td className={item.improves_lineup ? "num" : "num muted"}>
-                      {item.improves_lineup ? (
-                        `+${item.marginal_value.toFixed(1)}`
-                      ) : item.fills_open_seat ? (
-                        "fills seat"
-                      ) : (
-                        <span
-                          title={
-                            `${Math.abs(item.lineup_delta).toFixed(0)} short of the starter ` +
-                            `they would have to displace. Bench depth, but this is how close ` +
-                            `they come — and it is what orders the board once your lineup is full.`
-                          }
-                        >
-                          {item.lineup_delta.toFixed(0)}
-                        </span>
-                      )}
-                    </td>
-                    <td className="num muted">{`${Math.round(item.survival * 100)}%`}</td>
-                    <td className="num">{item.score.toFixed(1)}</td>
-                    <td className="num">
-                      {item.valuation ? (
-                        <span
-                          className={`conf conf-${confidenceOf(item.valuation.projected_points, item.valuation.model_sd)}`}
-                          title={confidenceTitle(item.valuation.projected_points, item.valuation.model_sd)}
-                          aria-label={confidenceAria(item.valuation.projected_points, item.valuation.model_sd)}
-                        >
-                          ±{item.valuation.model_sd.toFixed(0)}
-                        </span>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                    <td>
-                      <button className="primary" disabled={busy} onClick={() => draft(item.player.id)}>
-                        draft
-                      </button>
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="num score">{item.score.toFixed(1)}</td>
+                      <td className="num">
+                        {item.valuation ? (
+                          <span
+                            className={`conf conf-${confidenceOf(item.valuation.projected_points, item.valuation.model_sd)}`}
+                            title={confidenceTitle(item.valuation.projected_points, item.valuation.model_sd)}
+                            aria-label={confidenceAria(item.valuation.projected_points, item.valuation.model_sd)}
+                          >
+                            ±{item.valuation.model_sd.toFixed(0)}
+                          </span>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <button className="sm primary" disabled={busy} onClick={() => draft(item.player.id)}>
+                          Draft
+                        </button>
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
             </table>
-            <ConfidenceLegend />
           </div>
-        </div>
+        </Panel>
 
-        <div className="card">
-          <h2>Draft board</h2>
-          <div className="body scroll">
-            <p className="muted" style={{ marginTop: 0 }}>
-              Highlighted rows are your picks.
-            </p>
+        <Panel
+          code="SEC-04"
+          title="Draft board"
+          flush
+          meta={
+            <span>
+              <span style={{ color: "var(--amber)" }}>▎</span>yours{" "}
+              <span style={{ color: "var(--go)" }}>▎</span>on the clock
+            </span>
+          }
+        >
+          <div className="scroll">
             <table>
               <thead>
                 <tr>
                   <th className="num">#</th>
                   <th className="num">Rd</th>
-                  <th className="num">Slot</th>
+                  <th className="num">Team</th>
                   <th>Player</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {picks.map((p) => (
-                  <tr key={p.id} className={p.is_mine ? "mine" : ""}>
-                    <td className="num">{p.pick_number}</td>
-                    <td className="num">{p.round}</td>
-                    <td className="num">{p.team_slot}</td>
+                  <tr
+                    key={p.id}
+                    className={p.is_mine ? "mine" : p.id === onClock?.id ? "clock" : undefined}
+                  >
+                    <td className="num idx">
+                      <b>{pad(p.pick_number, 3)}</b>
+                    </td>
+                    <td className="num muted">{p.round}</td>
+                    <td className="num muted">T{pad(p.team_slot)}</td>
                     <td>
                       {p.player ? (
                         <span className="player-cell">
-                          <Headshot
-                            espnPlayerId={p.player.espn_player_id}
-                            name={p.player.name}
-                            size={22}
-                          />
+                          <Headshot espnPlayerId={p.player.espn_player_id} name={p.player.name} size={24} />
                           <span className="stack">
-                            {p.player.name}
+                            <span className="pname">{p.player.name}</span>
                             <span className="muted"> {p.player.positions.join("/")}</span>
                           </span>
+                        </span>
+                      ) : p.id === onClock?.id ? (
+                        <span className="seat-open" style={{ color: "var(--go)" }}>
+                          ▶ On the clock
                         </span>
                       ) : (
                         <span className="muted">—</span>
@@ -440,8 +551,9 @@ function MockView() {
                     <td>
                       {p.player_id && (
                         <button
-                          className="danger"
+                          className="sm danger"
                           disabled={busy}
+                          aria-label={`undo pick ${p.pick_number}`}
                           onClick={() =>
                             // null clears the slot and returns the player to
                             // best-available.
@@ -462,7 +574,7 @@ function MockView() {
               </tbody>
             </table>
           </div>
-        </div>
+        </Panel>
       </div>
     </>
   );
@@ -470,7 +582,7 @@ function MockView() {
 
 export default function MockPage() {
   return (
-    <Suspense fallback={<p className="muted">Loading…</p>}>
+    <Suspense fallback={<Loading />}>
       <MockView />
     </Suspense>
   );
