@@ -44,22 +44,29 @@ class PlayerProjection:
     positions: tuple[str, ...]
     stats: dict[str, float]
     pro_team: str = ""
-    # ESPN's OWN projected fantasy total for this player, already scored under
-    # this league's settings (their `appliedTotal`). It arrives in the same
-    # payload as `stats` and is a genuinely different opinion, not a rederivation
-    # of it: ESPN projects the stats it does not publish rather than leaving
-    # them out, so this number includes rebounding splits and double-doubles
-    # that stats.py has to estimate. Optional because a fake source, a hand-built
-    # projection and a pool synced before this field existed all lack it.
+    # ESPN's projected fantasy total for this player (their `appliedTotal`):
+    # this league's weights applied to the SAME projected line as `stats`, with
+    # every stat ESPN does not project — oreb, dreb, dd, td — scored as zero.
+    # Verified to 0.1% on all 1,085 projected player-seasons 2024-2026. So it
+    # is not a second opinion on the player; it is ESPN's number with the very
+    # hole stats.py exists to fill, and it undervalues rebounders and
+    # double-double producers accordingly. Kept because it is what the draft
+    # room SEES, which is what the market survival model and the ESPN bots
+    # need. Optional because a fake source, a hand-built projection and a pool
+    # synced before this field existed all lack it.
     espn_points: float | None = None
     # ESPN's injury flag: "ACTIVE", "DAY_TO_DAY" or "OUT" (None when the feed
     # says nothing). Carried because it is decision-relevant at the draft and
     # arrives free in the same payload — a player who is OUT is worth knowing
     # about before you spend a pick, whatever their projection says.
     #
-    # It deliberately does NOT feed the valuation. ESPN's own projection
-    # already embeds their view of games missed, so discounting a second time
-    # here would double-count; see the README's availability note.
+    # It deliberately does NOT feed the valuation, though not for the reason
+    # this comment once gave. It is not a double count: ESPN's projected games
+    # still run ~12% above games played (valuation/availability.py). It is
+    # that ESPN serves only a player's CURRENT flag, so there is no record of
+    # what the flag said before any past season, and nothing to fit a
+    # discount against. An unfitted guess would move the board on a number
+    # nobody has checked.
     injury_status: str | None = None
     # Prior seasons' actuals, fetched at sync so valuation never has to go
     # back to ESPN. Empty when history has not been synced, which every

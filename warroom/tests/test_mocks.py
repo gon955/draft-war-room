@@ -27,9 +27,10 @@ import uuid
 import pytest
 from sqlalchemy import event, func, select
 
-from warroom.api.routes.mocks import generate_picks
+from warroom.api.routes.mocks import CONFIDENT_BANDS, generate_picks
 from warroom.models import MockDraft, MockPick, Player, Ranking, Valuation
 from warroom.tests.conftest import SEASON, SPEC_53_EXPECTED_RANKING
+from warroom.valuation.stats import comparative_sd
 
 PICKS_PER_MOCK = 26  # num_teams 2 x roster_size 13
 
@@ -1255,12 +1256,18 @@ class TestVonaEndpoint:
 
 
 class TestConfidentSort:
-    """Ranking by the score you would get in a poor outcome for the parts of
-    the projection this app inferred rather than measured."""
+    """Ranking by the score you would get in a poor outcome, for the part of the
+    uncertainty that distinguishes one player from another: estimated stats,
+    and a less settled role than a heavy-minutes starter's."""
 
     def test_it_is_accepted_and_orders_by_the_discounted_score(self, client, auth_a, mock_id):
         items = recommended(client, mock_id, auth_a, "&sort=confident")["items"]
-        discounted = [i["score"] - i["valuation"]["model_sd"] for i in items]
+        discounted = [
+            i["score"]
+            - CONFIDENT_BANDS
+            * comparative_sd(i["valuation"]["value_sd"], i["valuation"]["projected_points"])
+            for i in items
+        ]
         assert discounted == sorted(discounted, reverse=True)
 
     def test_the_band_rides_on_the_valuation(self, client, auth_a, mock_id):
@@ -1270,12 +1277,79 @@ class TestConfidentSort:
         assert top["valuation"]["value_sd"] > 0
         assert "model_sd" in top["valuation"]
 
-    def test_a_pool_with_nothing_estimated_orders_the_same_as_score(self, client, auth_a, mock_id):
-        """The fixture league scores only `pts`, which ESPN projects directly,
-        so there is no model component to discount and the two agree."""
-        assert recommended_ids(client, mock_id, auth_a, "&sort=confident") == (
-            recommended_ids(client, mock_id, auth_a, "&sort=score")
+    def test_a_pool_of_settled_starters_orders_the_same_as_score(
+        self, client, db, auth_a, league, board, players
+    ):
+        """Heavy minutes and nothing estimated (the fixture scores only `pts`):
+        every band is the shared floor, which cancels, so the two agree."""
+        for player in players:
+            player.projections = {**player.projections, "mpg": 34.0}
+        db.commit()
+        compute(client, league, auth_a)
+        mock = make_mock(client, board, auth_a).json()["id"]
+
+        items = recommended(client, mock, auth_a)["items"]
+        assert all(
+            comparative_sd(i["valuation"]["value_sd"], i["valuation"]["projected_points"])
+            == pytest.approx(0.0, abs=1e-6)
+            for i in items
         )
+        assert recommended_ids(client, mock, auth_a, "&sort=confident") == (
+            recommended_ids(client, mock, auth_a, "&sort=score")
+        )
+
+    def test_an_unsettled_role_is_discounted_where_the_default_sort_ignores_it(
+        self, client, db, auth_a, league, board, players
+    ):
+        """The same projection, one on heavy minutes and one off the bench:
+        the default sort cannot tell them apart, the confident sort must."""
+        for player in players:
+            player.projections = {**player.projections, "mpg": 34.0}
+        bench = players[0]
+        bench.projections = {**bench.projections, "mpg": 16.0}
+        db.commit()
+        compute(client, league, auth_a)
+        mock = make_mock(client, board, auth_a).json()["id"]
+
+        by_score = recommended_ids(client, mock, auth_a, "&sort=score")
+        by_confidence = recommended_ids(client, mock, auth_a, "&sort=confident")
+        assert by_confidence.index(bench.espn_player_id) > by_score.index(bench.espn_player_id)
+
+
+class TestRolloutDepth:
+    """depth=rollout: the top candidates played forward to your next pick.
+    The engine behaviour is pinned in valuation/tests/test_advice.py; these
+    pin the API contract around it."""
+
+    def test_greedy_is_the_default_and_carries_no_rollout(self, client, auth_a, mock_id):
+        items = recommended(client, mock_id, auth_a)["items"]
+        assert all(i["rollout"] is None for i in items)
+
+    def test_rollout_candidates_lead_in_rollout_order(self, client, auth_a, mock_id):
+        items = recommended(client, mock_id, auth_a, "&depth=rollout")["items"]
+        rolled = [i for i in items if i["rollout"] is not None]
+
+        assert 0 < len(rolled) <= 10
+        assert items[: len(rolled)] == rolled
+        values = [i["rollout"]["value"] for i in rolled]
+        assert values == sorted(values, reverse=True)
+
+    def test_each_rollout_names_the_expected_next_pick(self, client, auth_a, mock_id):
+        items = recommended(client, mock_id, auth_a, "&depth=rollout")["items"]
+        rolled = [i for i in items if i["rollout"] is not None]
+        for item in rolled:
+            nxt = item["rollout"]["next_player"]
+            assert nxt is None or nxt["id"] != item["player"]["id"]
+
+    def test_other_sorts_keep_their_order(self, client, auth_a, mock_id):
+        for sort in ("value", "marginal", "confident"):
+            greedy = recommended_ids(client, mock_id, auth_a, f"&sort={sort}")
+            deep = recommended_ids(client, mock_id, auth_a, f"&sort={sort}&depth=rollout")
+            assert greedy == deep, sort
+
+    def test_an_unknown_depth_is_422(self, client, auth_a, mock_id):
+        r = client.get(f"/mocks/{mock_id}/recommendation?depth=deeper", headers=auth_a)
+        assert r.status_code == 422
 
 
 class TestSimulationBasis:

@@ -26,19 +26,8 @@ from sqlalchemy.orm import Session
 from warroom.config import get_settings
 from warroom.models import MockDraft, MockPick, Player, Ranking, ScoringFormat, Valuation
 from warroom.services.valuation import NotAPointsLeague, settings_for, to_projection
-from warroom.valuation.draft import (
-    LiveValue,
-    bench_replacement,
-    default_slot_eligibility,
-    expected_next_best,
-    lineup_deltas,
-    live_replacement_levels,
-    live_values,
-    open_slots,
-    pick_scores,
-    picks_until_next,
-    survival_probabilities,
-)
+from warroom.valuation.advice import RolloutField, advise
+from warroom.valuation.draft import LiveValue
 from warroom.valuation.engine import ReplacementBasis as EngineBasis
 
 
@@ -82,9 +71,16 @@ class Recommendation:
     # live value. 0.0 means every seat they fit is held by someone better, so
     # they are depth rather than an upgrade.
     marginal: float
+    # Rollout mode only, and only for the candidates it played forward: your
+    # lineup's value after this pick plus your best response next turn, and
+    # who that response was. None everywhere in greedy mode.
+    rollout_value: float | None = None
+    rollout_next: Player | None = None
 
 
-def recommend(db: Session, mock: MockDraft) -> tuple[list[Recommendation], int]:
+def recommend(
+    db: Session, mock: MockDraft, rollout: bool = False
+) -> tuple[list[Recommendation], int]:
     """Every undrafted player in this mock, re-valued against the live board.
 
     Returns them best-first by live value, plus how many picks you have to
@@ -146,104 +142,73 @@ def recommend(db: Session, mock: MockDraft) -> tuple[list[Recommendation], int]:
 
     available = [(p, v) for p, v in valued.values() if p.id not in drafted]
 
-    settings = settings_for(league)
-    # The live board answers the same question the cached one does; a
-    # board that redefines value the moment you start drafting is not one
-    # you can practise against.
-    basis = EngineBasis(settings.replacement_basis)
-    projections = [to_projection(p) for p, _ in available]
-    points = {p.espn_player_id: v.projected_points for p, v in available}
-
-    results = live_values(
-        available=projections,
-        rosters=list(rosters.values()),
-        settings=settings,
-        points=points,
-        preseason={p.espn_player_id: (v.replacement_points, v.value) for p, v in available},
-        basis=basis,
-    )
-
-    # Step 2: the same board, re-read against YOUR seats. The replacement
-    # levels are recomputed rather than passed out of live_values because the
-    # rostered players need valuing on the same basis as the candidates — a
-    # lineup that compares one player's VOR against another's raw projection
-    # would rate every incumbent replaceable.
-    replacement = live_replacement_levels(projections, list(rosters.values()), settings, points)
-    # Points for EVERY valued player, drafted or not: marginal_values has to
-    # price the incumbents in your lineup, and they are by definition absent
-    # from the available pool.
-    all_points = {p.espn_player_id: v.projected_points for p, v in valued.values()}
-
-    needed = open_slots(mine, settings)
-
-    delta = lineup_deltas(
-        candidates=results,
-        roster=mine,
-        settings=settings,
-        replacement=replacement,
-        bench=bench_replacement(projections, replacement, points),
-        points=all_points,
-    )
-    # The clamp, for display. `delta` keeps the ordering the clamp destroys.
-    marginal = {pid: max(0.0, d) for pid, d in delta.items()}
-
-    # Step 3. Who picks between this pick and your next one, and what each
-    # of those teams is short of — a team with your position still open is a
-    # threat to your shortlist, one with it filled is not.
-    upcoming = [(n, slot, is_mine) for n, slot, pid, is_mine in board_rows if pid is None]
-    intervening = picks_until_next(upcoming)
-
-    # The room's board, for the survival model only. Built from ESPN's own
-    # projected total, which every other manager in the league can see and
-    # this app's cannot be. A pool synced before that column existed yields an
-    # empty mapping, and field_order then falls back to our own ordering —
-    # the previous behaviour, rather than an error.
+    # The room's board, for the survival model and the rollout's field. Built
+    # from ESPN's projected total, which is what every other manager sees
+    # while drafting. A pool synced before that column existed yields an
+    # empty mapping, and both fall back to our own ordering — the previous
+    # behaviour, rather than an error.
+    espn_points = {
+        player.espn_player_id: player.espn_projected_points
+        for player, _ in valued.values()
+        if player.espn_projected_points is not None
+    }
     market_rank = {
-        player.espn_player_id: rank
-        for rank, (player, _) in enumerate(
-            sorted(
-                (pair for pair in valued.values() if pair[0].espn_projected_points is not None),
-                key=lambda pair: -pair[0].espn_projected_points,
-            )
-        )
+        pid: rank for rank, pid in enumerate(sorted(espn_points, key=lambda i: -espn_points[i]))
     }
 
-    survival = survival_probabilities(
-        results,
-        [rosters.get(slot, []) for slot in intervening],
-        settings,
+    settings = settings_for(league)
+    upcoming = [(n, slot, is_mine) for n, slot, pid, is_mine in board_rows if pid is None]
+
+    advice, waiting = advise(
+        available=[to_projection(p) for p, _ in available],
+        rosters=rosters,
+        mine=mine,
+        upcoming=upcoming,
+        settings=settings,
+        # Points for EVERY valued player, drafted or not: the lineup maths has
+        # to price the incumbents in your lineup, and they are by definition
+        # absent from the available pool.
+        points={p.espn_player_id: v.projected_points for p, v in valued.values()},
+        preseason={p.espn_player_id: (v.replacement_points, v.value) for p, v in available},
+        # The live board answers the same question the cached one does; a
+        # board that redefines value the moment you start drafting is not one
+        # you can practise against.
+        basis=EngineBasis(settings.replacement_basis),
         market_rank=market_rank,
         market_weight=get_settings().draft_market_weight,
+        rollout=RolloutField(points=espn_points) if rollout else None,
     )
-    expected = expected_next_best(results, marginal, survival)
-    scores = pick_scores(marginal, expected)
 
     # The engine speaks espn_player_id end to end; the rows are keyed by UUID.
     # unique(espn_player_id, season) plus the season filter above makes this
     # mapping total, the same argument services/valuation.py makes.
-    by_espn_id = {p.espn_player_id: (p, v) for p, v in available}
+    by_espn_id = {p.espn_player_id: (p, v) for p, v in valued.values()}
 
     rankings = {
         r.player_id: r for r in db.scalars(select(Ranking).where(Ranking.board_id == board.id))
     }
 
     out = []
-    for result in results:
-        player, valuation = by_espn_id[result.value.player.espn_player_id]
+    for a in advice:
+        player, valuation = by_espn_id[a.live.value.player.espn_player_id]
         out.append(
             Recommendation(
                 player,
                 valuation,
                 rankings.get(player.id),
-                result,
-                any(
-                    default_slot_eligibility(slot, result.value.player.positions) for slot in needed
+                a.live,
+                a.fills_open_seat,
+                a.survival,
+                a.expected_next,
+                a.lineup_delta,
+                a.score,
+                a.marginal,
+                rollout_value=a.rollout.value if a.rollout else None,
+                rollout_next=(
+                    by_espn_id[a.rollout.next_player.espn_player_id][0]
+                    if a.rollout and a.rollout.next_player
+                    else None
                 ),
-                survival.get(result.value.player.espn_player_id, 1.0),
-                expected.get(result.value.player.espn_player_id, 0.0),
-                delta.get(result.value.player.espn_player_id, 0.0),
-                scores.get(result.value.player.espn_player_id, 0.0),
-                marginal.get(result.value.player.espn_player_id, 0.0),
             )
         )
-    return out, len(intervening)
+    return out, waiting

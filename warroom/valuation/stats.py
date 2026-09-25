@@ -93,9 +93,9 @@ DERIVATIONS: dict[str, Derivation] = {
 # absolute error from 0.0776 to 0.0675 — about 13%.
 #
 # ESPN publishes OREB/DREB for COMPLETED seasons but projects only REB, so this
-# gap cannot be closed with projection data alone. Apportioning a player's own
-# projected rebounds by their own prior-season split would be better still; it
-# needs a second season fetch in the adapter, which this deliberately does not do.
+# gap cannot be closed with projection data alone. This table is now the PRIOR
+# for offensive_share below, and the whole answer only for a player with no
+# rebounding history.
 OFFENSIVE_REBOUND_SHARE: dict[str, float] = {
     "PG": 0.178,
     "SG": 0.211,
@@ -107,7 +107,7 @@ OFFENSIVE_REBOUND_SHARE: dict[str, float] = {
 DEFAULT_OFFENSIVE_SHARE = 0.246
 
 
-def offensive_share(positions: Iterable[str]) -> float:
+def positional_offensive_share(positions: Iterable[str]) -> float:
     """Blend the per-position shares for a multi-eligible player."""
     known = [
         OFFENSIVE_REBOUND_SHARE[p.upper()]
@@ -117,11 +117,63 @@ def offensive_share(positions: Iterable[str]) -> float:
     return sum(known) / len(known) if known else DEFAULT_OFFENSIVE_SHARE
 
 
+# A player's own offensive share, shrunk toward their position's:
+#
+#     share = (oreb + k * positional) / (reb + k)
+#
+# which is (n * own + k * prior) / (n + k) with n counted in rebounds, so the
+# pull toward the position fades exactly as the sample grows. Fitted by
+# scripts/calibration/oreb_share.py, both chosen on 2025 alone and judged on
+# seasons the fit never saw. Share MAE over players with 100+ rebounds:
+#
+#                   positional only    this
+#     2026 held out      0.0682       0.0430   (37% lower)
+#     2024 held out      0.0647       0.0432   (33% lower)
+#
+# k=50 is about a third of a starting big's season: a player with 600 career
+# rebounds is ~92% their own number, a two-way player with 40 is mostly their
+# position's. Depth 2 and 3 were within 0.001 of each other on every season;
+# 3 won the fit season and is kept rather than re-picked on held-out data.
+OREB_SHARE_PRIOR_REBOUNDS = 50.0
+OREB_SHARE_SEASONS = 3
+
+
+def offensive_share(
+    player: PlayerProjection,
+    prior_rebounds: float | None = None,
+    seasons: int | None = None,
+) -> float:
+    """This player's expected offensive share of their rebounds.
+
+    Pools the most recent `seasons` of history. A season the player missed,
+    spent outside the NBA or that was never fetched simply contributes no
+    rebounds, so a player with no history at all gets the positional share
+    unchanged — today's behaviour, and never worse than it.
+
+    The two keyword arguments exist for the calibration script, which sweeps
+    them; valuation always runs on the fitted constants.
+    """
+    k = OREB_SHARE_PRIOR_REBOUNDS if prior_rebounds is None else prior_rebounds
+    depth = OREB_SHARE_SEASONS if seasons is None else seasons
+    prior = positional_offensive_share(player.positions)
+
+    offensive = total = 0.0
+    for season in sorted(player.history, reverse=True)[:depth]:
+        line = player.history[season]
+        if line and line.get("reb") and "oreb" in line:
+            offensive += line["oreb"]
+            total += line["reb"]
+
+    if total + k <= 0:
+        return prior
+    return (offensive + k * prior) / (total + k)
+
+
 def _split_rebounds(player: PlayerProjection, stat: str) -> float | None:
     total = player.stats.get("reb")
     if total is None:
         return None
-    share = offensive_share(player.positions)
+    share = offensive_share(player)
     return total * share if stat == "oreb" else total * (1.0 - share)
 
 
@@ -197,8 +249,8 @@ def _double_doubles(player: PlayerProjection, stat: str) -> float | None:
 Estimator = tuple[Callable[[PlayerProjection, str], float | None], str]
 
 ESTIMATORS: dict[str, Estimator] = {
-    "oreb": (_split_rebounds, "reb x position offensive share"),
-    "dreb": (_split_rebounds, "reb x (1 - position offensive share)"),
+    "oreb": (_split_rebounds, "reb x own offensive share, shrunk to position"),
+    "dreb": (_split_rebounds, "reb x (1 - own offensive share, shrunk to position)"),
     "dd": (_double_doubles, "P(2+ categories reach 10) x games"),
     "td": (_double_doubles, "P(3+ categories reach 10) x games"),
 }
@@ -363,19 +415,32 @@ def untrustworthy_share(coverage: Iterable[StatCoverage]) -> float:
 #                           into a per-game rate error (sd 26.2%) and an
 #                           availability error (sd ~29%), which compose to
 #                           38.9% — close enough to the directly measured
-#                           36.7% to trust the decomposition.
+#                           36.7% to trust the decomposition. Now only the
+#                           fallback for a caller that passes no baseline;
+#                           valuation uses baseline_for, below.
 #
 #   ESTIMATOR_RELATIVE_SD   each estimator's OWN error, isolated by splitting
 #                           ACTUAL rebounds and comparing against actual
 #                           oreb/dreb, so ESPN's projection error is not
-#                           double-counted. oreb n=292 sd 40.1%; dreb n=342
-#                           sd 15.1%. Offensive rebounds are far harder to
-#                           infer from a total than defensive ones, which is
-#                           why they get their own number.
+#                           double-counted. Measured by
+#                           scripts/calibration/oreb_share.py over 2026
+#                           players with 100+ rebounds (n=351), held out from
+#                           the fit: oreb 25.4%, dreb 8.8%. The positional
+#                           split this replaced measured 47.6% / 12.9% on the
+#                           same players. (The 40.1% / 15.1% it was previously
+#                           credited with came from a population nobody
+#                           recorded; oreb's sd swings 0.28-0.54 with the
+#                           minimum-rebound filter alone, so only same-
+#                           population comparisons mean anything.)
+#                           Offensive rebounds are still far harder to infer
+#                           from a total than defensive ones, which is why
+#                           they get their own number. One sd covers players
+#                           with and without history; the ~10% without are
+#                           on the positional split and err more.
 BASELINE_RELATIVE_SD = 0.367
 ESTIMATOR_RELATIVE_SD: dict[str, float] = {
-    "oreb": 0.401,
-    "dreb": 0.151,
+    "oreb": 0.254,
+    "dreb": 0.088,
     # Double-doubles, over the 110 players who posted five or more in
     # 2026. Correlation with actuals 0.975, mean absolute error 1.34
     # against 5.19 for the zero this replaced.
@@ -387,6 +452,114 @@ ESTIMATOR_RELATIVE_SD: dict[str, float] = {
 # An estimator nobody has backtested yet. Deliberately pessimistic: an
 # unmeasured model should widen the band more than a measured one, not less.
 UNMEASURED_ESTIMATOR_SD = 0.50
+
+# --------------------------------------------------------------------------- #
+# The per-player baseline.
+# --------------------------------------------------------------------------- #
+#
+# One pool-wide baseline assumed every projection is equally hard, and it is
+# not: over 2024-2026 a player projected under 24 minutes lands twice as far
+# from his projection as one projected over 30. Fitted by
+# scripts/calibration/uncertainty.py; see there for method and held-out
+# coverage. Two findings shaped the buckets as much as the numbers did:
+#
+#   * Minutes dominate. Every season, the same order, by a wide margin.
+#   * A short previous season (under SHORT_SEASON_GAMES) widens the band, but
+#     only below 30 minutes — a heavy-minutes player's role survives a missed
+#     stretch, a rotation player's may not. Above 30 it made no difference, so
+#     that band is not split.
+#
+# Experience is NOT a feature, and rookies get no separate bucket. Rookies'
+# errors were narrower than veterans' at the same minutes (0.49 vs 0.60-0.75
+# under 24 mpg), matching the handoff's finding that ESPN projects them
+# conservatively. They land in the not-short bucket for their minutes: "no
+# previous season" is not evidence of games missed. Nor is an unsynced history.
+#
+# Widths are the 68.3rd percentile of |actual/projected - 1| — the half-width
+# that covers the projection 68% of the time — not an sd around the mean. The
+# band is drawn around the projection, and projections currently run ~20% high
+# (games missed, mostly: item 4). Rerun the script when that is corrected.
+#
+# Coverage of the +/-1 band on each season held out from the fit, against the
+# old constant on the same players (projected 300+ points, 1,049 player-seasons):
+#
+#                      2024          2025          2026
+#                   const  fit    const  fit    const  fit
+#   mpg 30+          85%   83%     68%   61%     71%   63%
+#   mpg 24-30        66%   67%     73%   77%     60%   58%
+#   mpg <24          39%   63%     43%   70%     52%   69%
+#   mpg <30 short    19%   46%     43%   81%     47%   79%
+#   all              57%   67%     58%   70%     59%   66%
+#
+# The constant was right only for starters and missed the bench by up to 50
+# points of coverage. The worst remaining cell, short seasons in 2024, is that
+# season rather than the bucket: low-minute errors ran ~35% wider in 2024 than
+# in 2025 or 2026 across the board, which no pre-season feature can see. A
+# short-season split within 24-30 mpg was tried and dropped: 44 player-seasons,
+# coverage swinging 50-88%, and a width within 0.01 of the bucket it now shares.
+SHORT_SEASON_GAMES = 50
+BASELINE_BUCKETS: dict[str, float] = {
+    "mpg 30+": 0.313,  # n=337
+    "mpg 24-30": 0.376,  # n=254
+    "mpg <24": 0.623,  # n=270
+    "mpg <30 short": 0.726,  # n=188
+}
+
+
+# The part of every player's band that NO player escapes: the width of the
+# tightest bucket. Comparisons between players are unaffected by it, which is
+# the sense in which "the baseline cancels" was ever true — and it is only
+# this floor, not a player's whole baseline, that cancels.
+BASELINE_FLOOR = min(BASELINE_BUCKETS.values())
+
+
+def comparative_sd(value_sd: float, projected_points: float) -> float:
+    """The part of a stored band that distinguishes this player from others.
+
+    value_sd^2 = (baseline^2 + model variance) * points^2, so taking out the
+    floor every player shares leaves the model component and the player's
+    excess baseline together, already combined in quadrature. A heavy-minutes
+    starter on measured stats reads 0; a rotation big whose score is part
+    modelled reads both of his reasons for doubt.
+
+    From the stored columns alone, so the confident sort needs no migration.
+    """
+    shared = BASELINE_FLOOR * abs(projected_points)
+    return math.sqrt(max(0.0, value_sd**2 - shared**2))
+
+
+def projected_minutes(player: PlayerProjection) -> float | None:
+    mpg = player.stats.get("mpg")
+    if mpg:
+        return mpg
+    minutes, games = player.stats.get("min"), player.stats.get("gp")
+    return minutes / games if minutes and games else None
+
+
+def baseline_bucket(player: PlayerProjection) -> str:
+    """Which BASELINE_BUCKETS row describes this player's projection."""
+    minutes = projected_minutes(player)
+    if minutes is not None and minutes >= 30:
+        return "mpg 30+"
+
+    if player.history:
+        last = player.history[max(player.history)]
+        # None is "not in the NBA" — a rookie — and is not a short season.
+        # {} is "listed, no line": the whole season missed, the shortest.
+        if last is not None and last.get("gp", 0.0) < SHORT_SEASON_GAMES:
+            return "mpg <30 short"
+    return "mpg 24-30" if minutes is not None and minutes >= 24 else "mpg <24"
+
+
+def baseline_for(player: PlayerProjection) -> float:
+    """The relative sd this player's projection deserves, before modelling.
+
+    A player ESPN gives no minutes lands in the widest band, which is the
+    honest answer; it rarely matters, since they are projected near zero.
+    """
+    return BASELINE_BUCKETS.get(baseline_bucket(player), BASELINE_RELATIVE_SD)
+
+
 # An UNAVAILABLE stat is scored as 0.0, so the whole of its true contribution
 # is missing rather than merely mis-sized. There is no share of it in the
 # player's points to scale, which is why it cannot be handled here — see
@@ -431,7 +604,7 @@ def player_uncertainty(
     player: PlayerProjection,
     weights: Mapping[str, float],
     provenance: Mapping[str, Provenance],
-    baseline: float = BASELINE_RELATIVE_SD,
+    baseline: Callable[[PlayerProjection], float] = baseline_for,
 ) -> ValueUncertainty:
     """The error bar on one player's projected points.
 
@@ -445,9 +618,10 @@ def player_uncertainty(
     points minus a replacement level, and that level is a pool-wide order
     statistic, far better determined than any single projection.
     """
+    base = baseline(player)
     total = sum(abs(player.stats.get(stat, 0.0) * weight) for stat, weight in weights.items())
     if total <= 0:
-        return ValueUncertainty(baseline, 0.0, 0.0, 0.0)
+        return ValueUncertainty(base, 0.0, 0.0, 0.0)
 
     model_variance = 0.0
     model_points = 0.0
@@ -461,7 +635,7 @@ def player_uncertainty(
         sd = ESTIMATOR_RELATIVE_SD.get(stat, UNMEASURED_ESTIMATOR_SD)
         model_variance += (contribution / total * sd) ** 2
 
-    relative = math.sqrt(baseline**2 + model_variance)
+    relative = math.sqrt(base**2 + model_variance)
     points = sum(player.stats.get(stat, 0.0) * weight for stat, weight in weights.items())
     return ValueUncertainty(
         relative_sd=relative,
@@ -475,7 +649,7 @@ def pool_uncertainty(
     players: Iterable[PlayerProjection],
     weights: Mapping[str, float],
     coverage: Iterable[StatCoverage],
-    baseline: float = BASELINE_RELATIVE_SD,
+    baseline: Callable[[PlayerProjection], float] = baseline_for,
 ) -> dict[int, ValueUncertainty]:
     """player_uncertainty for a whole pool, keyed by espn_player_id."""
     provenance = {c.stat: c.provenance for c in coverage}

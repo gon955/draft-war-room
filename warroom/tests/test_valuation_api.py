@@ -680,3 +680,35 @@ class TestUncertaintyBand:
         assert items
         seated = [i for i in items if i["live"]["assigned_slot"] != "BENCH"]
         assert 0 < len(seated) <= 6
+
+
+class TestAvailabilitySetting:
+    """AVAILABILITY_MODEL scales projected totals before values are computed.
+    Off by default; see valuation/availability.py for why."""
+
+    def test_off_by_default(self):
+        from warroom.config import Settings
+
+        assert Settings().availability_model is False
+
+    def test_on_scales_every_projection_by_its_factor(
+        self, client, db, auth_a, league, players, monkeypatch
+    ):
+        from warroom.config import get_settings
+        from warroom.services.valuation import to_projection
+        from warroom.valuation.availability import availability_factor
+
+        compute(client, league, auth_a)
+        raw = {
+            v.player_id: v.projected_points
+            for v in db.scalars(select(Valuation).where(Valuation.league_id == league.id))
+        }
+
+        monkeypatch.setattr(get_settings(), "availability_model", True)
+        compute(client, league, auth_a)
+        db.expire_all()
+
+        for v in db.scalars(select(Valuation).where(Valuation.league_id == league.id)):
+            factor = availability_factor(to_projection(db.get(Player, v.player_id)))
+            assert factor < 1.0
+            assert v.projected_points == pytest.approx(raw[v.player_id] * factor)

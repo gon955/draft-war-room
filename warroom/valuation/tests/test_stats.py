@@ -18,17 +18,24 @@ import pytest
 
 from warroom.valuation.domain import PlayerProjection
 from warroom.valuation.stats import (
-    BASELINE_RELATIVE_SD,
+    BASELINE_BUCKETS,
+    BASELINE_FLOOR,
     DEFAULT_OFFENSIVE_SHARE,
     ESTIMATOR_RELATIVE_SD,
     OFFENSIVE_REBOUND_SHARE,
+    OREB_SHARE_PRIOR_REBOUNDS,
+    OREB_SHARE_SEASONS,
     UNMEASURED_ESTIMATOR_SD,
     Provenance,
     StatCoverage,
     _double_doubles,
+    baseline_bucket,
+    baseline_for,
+    comparative_sd,
     offensive_share,
     player_uncertainty,
     pool_uncertainty,
+    positional_offensive_share,
     resolve_pool,
     untrustworthy_share,
 )
@@ -107,17 +114,23 @@ class TestReboundEstimate:
     def test_guards_get_a_smaller_offensive_share_than_centres(self):
         """Measured over 290 real players; the gradient is the reason this beats
         one flat share, so it is worth a test rather than a comment."""
-        assert offensive_share(("PG",)) < offensive_share(("SF",)) < offensive_share(("C",))
+        share = positional_offensive_share
+        assert share(("PG",)) < share(("SF",)) < share(("C",))
 
     def test_a_multi_position_player_blends_the_shares(self):
-        blended = offensive_share(("PG", "C"))
+        blended = positional_offensive_share(("PG", "C"))
 
         assert blended == pytest.approx(
             (OFFENSIVE_REBOUND_SHARE["PG"] + OFFENSIVE_REBOUND_SHARE["C"]) / 2
         )
 
     def test_an_unknown_position_falls_back_to_the_pool_median(self):
-        assert offensive_share(("XX",)) == DEFAULT_OFFENSIVE_SHARE
+        assert positional_offensive_share(("XX",)) == DEFAULT_OFFENSIVE_SHARE
+
+    def test_no_history_is_exactly_the_positional_split(self):
+        """The fallback the whole change rests on: a rookie, or a pool synced
+        before history existed, is valued exactly as before."""
+        assert offensive_share(player({}, positions=("C",))) == OFFENSIVE_REBOUND_SHARE["C"]
 
     def test_no_rebounds_projected_means_unavailable_not_zero(self):
         players, cov = resolve_pool([player({"ast": 10.0})], {"oreb": 2.0})
@@ -288,7 +301,17 @@ class TestUncertainty:
         u = player_uncertainty(self._p(pts=1000.0), self.WEIGHTS, self.PROV)
         assert u.model_share == 0.0
         assert u.model_points_sd == 0.0
-        assert u.relative_sd == pytest.approx(BASELINE_RELATIVE_SD)
+        assert u.relative_sd == pytest.approx(baseline_for(self._p(pts=1000.0)))
+
+    def test_the_baseline_widens_the_band_but_not_the_model_part(self):
+        """The confident sort reads model_sd; a player's baseline must not leak
+        into it, or a volatile role would be double-charged as model error."""
+        player = self._p(pts=500.0, reb=500.0, oreb=150.0, dreb=350.0)
+        tight = player_uncertainty(player, self.WEIGHTS, self.PROV, baseline=lambda _: 0.2)
+        wide = player_uncertainty(player, self.WEIGHTS, self.PROV, baseline=lambda _: 0.6)
+
+        assert wide.points_sd > tight.points_sd
+        assert wide.model_points_sd == pytest.approx(tight.model_points_sd)
 
     def test_estimated_stats_widen_the_band(self):
         clean = player_uncertainty(self._p(pts=1000.0), self.WEIGHTS, self.PROV)
@@ -437,3 +460,154 @@ class TestDoubleDoubles:
         band = pool_uncertainty(resolved, self.WEIGHTS, coverage)[1]
         assert band.model_share > 0.9  # this league scores nothing else
         assert band.model_points_sd > 0
+
+
+def with_history(history, positions=("C",)):
+    return PlayerProjection(
+        espn_player_id=1, name="Test Big", positions=positions, stats={}, history=history
+    )
+
+
+class TestOwnOffensiveShare:
+    """A player's own prior split, shrunk toward their position's by sample
+    size: (oreb + k * positional) / (reb + k)."""
+
+    K = OREB_SHARE_PRIOR_REBOUNDS
+    C = OFFENSIVE_REBOUND_SHARE["C"]
+
+    def test_the_formula(self):
+        share = offensive_share(with_history({2026: {"oreb": 200.0, "reb": 600.0}}))
+        assert share == pytest.approx((200 + self.K * self.C) / (600 + self.K))
+
+    def test_a_big_sample_is_mostly_the_players_own(self):
+        """A centre who rebounds offensively far above centres as a whole:
+        with three full seasons behind them the prior should barely move them."""
+        seasons = {y: {"oreb": 300.0, "reb": 750.0} for y in (2024, 2025, 2026)}
+        assert offensive_share(with_history(seasons)) == pytest.approx(0.4, abs=0.01)
+
+    def test_a_small_sample_is_mostly_the_position(self):
+        tiny = offensive_share(with_history({2026: {"oreb": 10.0, "reb": 12.0}}))
+        assert abs(tiny - self.C) < abs(10 / 12 - self.C) / 2
+
+    def test_seasons_pool_rather_than_average(self):
+        """Rebounds are the sample size, so a 700-rebound season outweighs a
+        70-rebound cameo instead of counting the same."""
+        history = {2026: {"oreb": 70.0, "reb": 700.0}, 2025: {"oreb": 35.0, "reb": 70.0}}
+        share = offensive_share(with_history(history), prior_rebounds=0.0)
+        assert share == pytest.approx(105 / 770)
+
+    def test_only_the_most_recent_seasons_count(self):
+        recent = {2026 - i: {"oreb": 100.0, "reb": 500.0} for i in range(OREB_SHARE_SEASONS)}
+        stale = {2026 - OREB_SHARE_SEASONS: {"oreb": 500.0, "reb": 500.0}}
+        share = offensive_share(with_history(recent | stale), prior_rebounds=0.0)
+        assert share == pytest.approx(0.2)
+
+    @pytest.mark.parametrize(
+        "line",
+        [None, {}, {"gp": 0.0}, {"reb": 0.0, "oreb": 0.0}],
+        ids=["not in the NBA", "listed, no line", "no games", "no rebounds"],
+    )
+    def test_an_empty_season_contributes_nothing(self, line):
+        assert offensive_share(with_history({2026: line})) == pytest.approx(self.C)
+
+    def test_the_split_uses_the_players_own_share(self):
+        big = with_history({2026: {"oreb": 300.0, "reb": 750.0}})
+        big = PlayerProjection(
+            espn_player_id=1,
+            name="Big",
+            positions=("C",),
+            stats={"reb": 1000.0},
+            history=big.history,
+        )
+        players, _ = resolve_pool([big], {"oreb": 2.0, "dreb": 1.0})
+
+        share = offensive_share(big)
+        assert players[0].stats["oreb"] == pytest.approx(1000 * share)
+        assert players[0].stats["oreb"] > 1000 * self.C
+        assert players[0].stats["oreb"] + players[0].stats["dreb"] == pytest.approx(1000.0)
+
+
+def prospect(mpg=None, history=None, **stats):
+    if mpg is not None:
+        stats["mpg"] = mpg
+    return PlayerProjection(
+        espn_player_id=1, name="P", positions=("SF",), stats=stats, history=history or {}
+    )
+
+
+class TestBaselineBuckets:
+    """baseline_for replaces one pool-wide band with one per kind of projection.
+    The widths are fitted (scripts/calibration/uncertainty.py); what is pinned
+    here is which player lands in which bucket, and the ordering the data
+    showed every season."""
+
+    def test_fewer_minutes_means_a_wider_band(self):
+        assert baseline_for(prospect(34)) < baseline_for(prospect(27)) < baseline_for(prospect(18))
+
+    def test_a_short_season_widens_a_rotation_player(self):
+        short = prospect(20, {2026: {"gp": 31.0}})
+        full = prospect(20, {2026: {"gp": 70.0}})
+        assert baseline_for(short) > baseline_for(full)
+
+    def test_but_not_a_heavy_minutes_one(self):
+        assert baseline_bucket(prospect(34, {2026: {"gp": 31.0}})) == "mpg 30+"
+
+    def test_only_the_most_recent_season_counts(self):
+        history = {2026: {"gp": 70.0}, 2025: {"gp": 10.0}}
+        assert baseline_bucket(prospect(20, history)) == "mpg <24"
+
+    def test_a_whole_season_missed_is_short(self):
+        """{} is listed-but-no-line: the season lost entirely."""
+        assert baseline_bucket(prospect(26, {2026: {}})) == "mpg <30 short"
+
+    def test_a_rookie_is_not_penalised(self):
+        """No previous season is not evidence of games missed, and rookies'
+        errors measured narrower than veterans' at the same minutes."""
+        rookie = prospect(20, {2026: None, 2025: None})
+        veteran = prospect(20, {2026: {"gp": 72.0}})
+        assert baseline_for(rookie) == baseline_for(veteran)
+
+    def test_no_synced_history_is_not_a_short_season(self):
+        assert baseline_bucket(prospect(20)) == "mpg <24"
+
+    def test_minutes_fall_back_to_total_over_games(self):
+        assert baseline_bucket(prospect(min=2400.0, gp=75.0)) == "mpg 30+"
+
+    def test_no_minutes_at_all_gets_the_widest_full_season_band(self):
+        assert baseline_bucket(prospect()) == "mpg <24"
+
+    def test_every_bucket_has_a_width(self):
+        buckets = {
+            baseline_bucket(p)
+            for p in (prospect(34), prospect(27), prospect(18), prospect(18, {2026: {"gp": 5.0}}))
+        }
+        assert buckets == set(BASELINE_BUCKETS)
+
+
+class TestComparativeSd:
+    """What the confident sort subtracts: the band minus the floor everyone
+    shares, which is the only part of it that cancels in a comparison."""
+
+    def test_a_starter_on_measured_stats_has_nothing_to_distinguish(self):
+        assert comparative_sd(BASELINE_FLOOR * 2000, 2000) == pytest.approx(0.0)
+
+    def test_a_wider_baseline_leaves_its_excess(self):
+        sd = comparative_sd(0.6 * 1000, 1000)
+        assert sd == pytest.approx(1000 * (0.6**2 - BASELINE_FLOOR**2) ** 0.5)
+
+    def test_matches_the_model_part_for_a_floor_player(self):
+        """A starter whose score is part-modelled: exactly the model sd."""
+        weights = {"pts": 1.0, "oreb": 2.0}
+        prov = {"pts": Provenance.EXACT, "oreb": Provenance.ESTIMATED}
+        big = PlayerProjection(
+            espn_player_id=1,
+            name="B",
+            positions=("C",),
+            stats={"pts": 1500.0, "oreb": 200.0, "mpg": 34.0},
+        )
+        u = player_uncertainty(big, weights, prov)
+        assert comparative_sd(u.points_sd, 1900.0) == pytest.approx(u.model_points_sd)
+
+    def test_never_negative_for_a_band_below_the_floor(self):
+        """Rows computed before per-player baselines, or a caller's own baseline."""
+        assert comparative_sd(10.0, 1000) == 0.0

@@ -1115,6 +1115,19 @@ export interface components {
             is_avoid?: boolean | null;
         };
         /**
+         * RecommendationDepth
+         * @description How far the recommendation looks ahead.
+         *
+         *     GREEDY prices each candidate against your roster as it stands; fast, and
+         *     the default. ROLLOUT also plays the top candidates forward — the field
+         *     drafts to your next turn on ESPN's numbers and you take your best
+         *     response — and ranks them by the lineup the two picks leave. It sees
+         *     what greedy cannot, that taking a big now makes next turn's big a bench
+         *     piece, at the cost of a few hundred milliseconds.
+         * @enum {string}
+         */
+        RecommendationDepth: "greedy" | "rollout";
+        /**
          * RecommendationOut
          * @description A best-available row plus its live, draft-aware re-valuation.
          *
@@ -1140,6 +1153,7 @@ export interface components {
             expected_next: number;
             /** Score */
             score: number;
+            rollout?: components["schemas"]["RolloutOut"] | null;
         };
         /**
          * RecommendationPage
@@ -1211,6 +1225,20 @@ export interface components {
          * @enum {string}
          */
         ReplacementBasis: "starter" | "waiver" | "marginal";
+        /**
+         * RolloutOut
+         * @description What taking this player leads to, played forward to your next pick.
+         *
+         *     Only on the candidates `depth=rollout` re-scored. `value` is your starting
+         *     lineup's value after this pick and your best response next turn, in the
+         *     same units as live.value; `next_player` is that response — the player the
+         *     rollout expects you to take with the next pick if you take this one now.
+         */
+        RolloutOut: {
+            /** Value */
+            value: number;
+            next_player: components["schemas"]["PlayerOut"] | null;
+        };
         /**
          * ScoringFormat
          * @enum {string}
@@ -2450,6 +2478,7 @@ export interface operations {
             query?: {
                 position?: components["schemas"]["Position"] | null;
                 sort?: components["schemas"]["RecommendationSort"];
+                depth?: components["schemas"]["RecommendationDepth"];
                 limit?: number;
                 offset?: number;
             };

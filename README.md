@@ -30,21 +30,33 @@ back) and `GET /mocks/{id}/recommendation` (below).
 
 ```
 warroom/
-  main.py          FastAPI app factory
+  main.py          FastAPI app factory, probes, CORS
   config.py        settings from the environment
   db.py            engine, session, declarative Base
-  models.py        the relational schema (SPEC §3)
+  models.py        the relational schema
   security.py      password hashing, JWT
-  crypto.py        Fernet for the ESPN cookie at rest (SPEC §2.3)
+  crypto.py        Fernet for the ESPN cookie at rest
+  throttle.py      per-address auth rate limiting
   authz.py         ownership + share rules; denied reads 404, never 403
   deps.py          shared FastAPI dependencies
   schemas/         Pydantic request/response models
-  api/routes/      one module per resource group (SPEC §4)
-  services/        sync, valuation persistence, tiering
+  api/routes/      one module per resource group
+  services/        sync, valuation persistence, tiering, recommendation,
+                   simulation, lineup
   valuation/       the engine — pure, framework-free, no I/O
-  tests/           app-level integration tests (SPEC §6)
+    engine.py        value over replacement
+    stats.py         league scoring vs. what ESPN projects; uncertainty bands
+    availability.py  games-played model (off by default)
+    draft.py         live values, survival, roster fit during a draft
+    advice.py        the recommendation ranking, greedy and rollout
+    data_source.py   the ESPN adapter
+  tests/           app-level integration tests
 alembic/           migrations
 frontend/          Next.js 16 App Router; static export, types from OpenAPI
+scripts/
+  seed_demo.py           demo league without touching ESPN
+  demo_recommendation.py show the recommendation moving as a board drains
+  calibration/           fit and check the engine's constants on past seasons
 ```
 
 Two seams do most of the architectural work:
@@ -187,10 +199,19 @@ gone" apart from "the app is gone".
 | `espn` | ESPN's own projected fantasy total, already scored under this league's settings |
 
 ESPN's number arrives in the same payload as the raw stat line and used to be
-discarded; it is now kept on `players.espn_projected_points`. It is an
-independent opinion rather than a rederivation of ours — ESPN projects the
-stats it does not publish (rebound splits, double-doubles) instead of leaving
-them out, so it is the one place their estimate of those is visible.
+discarded; it is now kept on `players.espn_projected_points`. It is **not** an
+independent opinion. It is the same projected stat line scored with this
+league's weights, with every stat ESPN does not project — offensive and
+defensive rebounds, double-doubles, triple-doubles — scored as zero: exactly
+the gap `stats.py` exists to fill. Checked to 0.1% for every projected player
+in 2024–2026 (`python -m scripts.calibration.baseline`). In this league that
+takes Jokić from 4,262 to 2,466 and Gobert from 2,257 to 990, and guards
+barely at all.
+
+That makes it the wrong number for valuing a player and the right one for
+predicting the room: it is what ESPN shows managers while they draft. A room
+drafting off it lets rebounders slide, which is the effect both this mode and
+the survival model below are meant to capture.
 
 **Only the per-player strength input changes.** Live replacement levels, the
 marginal basis and roster fit are all derived *from* that mapping, so the bots
@@ -216,6 +237,25 @@ construction and can never show you the player your league will let slide.
 
 `espn` needs no valuations computed, but it does need a pool synced since the
 column was added; until then it answers 422 naming `/sync`.
+
+## Recommendation order
+
+`GET /mocks/{id}/recommendation` takes two knobs:
+
+| `sort` | |
+|---|---|
+| `score` (default) | what your next two picks are worth together — a player likely to be there when the wheel comes back is worth less of *this* pick |
+| `marginal` | best for your roster now, ignoring timing |
+| `value` | the league-wide order, ignoring your roster too |
+| `confident` | `score` less half a band of the player's comparative uncertainty (`stats.comparative_sd`) |
+
+| `depth` | |
+|---|---|
+| `greedy` (default) | each candidate priced against your roster as it stands |
+| `rollout` | the top candidates also played forward: the field drafts to your next turn on ESPN's numbers, you take your best response, and candidates are ranked by the lineup the two picks leave. Sees what greedy cannot — taking a big now can make next turn's big a bench piece — for a few hundred milliseconds |
+
+The ranking itself lives in `valuation/advice.py`, framework-free, so the
+strategy harness in `scripts/calibration` measures exactly what the API serves.
 
 ## Predicting what the room will take
 
@@ -263,12 +303,50 @@ on `players.injury_status`, and the board and mock draft show a tag for
 anything other than ACTIVE. It arrives in the payload we already fetch and was
 being discarded.
 
-**It does not feed the valuation**, and that is deliberate: ESPN's projection
-already prices their own view of games missed, so discounting again here would
-double-count. It is displayed because it is the one thing on the row that can
-make you skip a player the numbers like. Nothing renders for a healthy player
-or for a pool synced before the column existed — a green "healthy" badge on a
-null would claim more than the data supports.
+**It does not feed the valuation**, and that is deliberate — though the reason
+has changed. It used to be that ESPN's projection already prices games missed,
+so discounting again would double-count; measured against the full projected
+line, players still play only ~88% of the games ESPN projects, so that was
+wrong. The real obstacle is that ESPN only serves a player's *current* flag:
+there is no record of what it said before any past season, so there is nothing
+to fit a discount against. It is displayed because it is the one thing on the
+row that can make you skip a player the numbers like. Nothing renders for a
+healthy player or for a pool synced before the column existed — a green
+"healthy" badge on a null would claim more than the data supports.
+
+## Availability
+
+`AVAILABILITY_MODEL=true` scales each player's projected totals to the share of
+their projected games players like them actually played — by projected minutes
+and a 3-season weighted share of games played — before values are computed
+(`warroom/valuation/availability.py`, fitted by
+`python -m scripts.calibration.availability`). **It is off**, on held-out
+evidence: this app's projections run 20–25% high and the model fixes that, but
+so does a flat haircut, and a flat haircut changes no ranking. What only a
+per-player model could add is better *order*, and on each of 2024–2026 held out
+from its fit it ranked the 130 players a draft takes no better than the flat
+haircut (rank correlation +0.007 on average; worse in 2024). Season-wide swings
+in games played dwarfed the differences between kinds of player. Turn it on for
+honest point totals, not better picks, and re-fit when a season closes.
+
+## Calibration
+
+The constants in `valuation/stats.py` and `valuation/availability.py` are
+measured, not chosen, against past seasons of a real league:
+
+```bash
+python -m scripts.calibration.fetch          # pull 2024-2026 once (needs ESPN_S2 / ESPN_SWID)
+python -m scripts.calibration.baseline       # reproduce the current constants first
+python -m scripts.calibration.oreb_share     # offensive rebound share
+python -m scripts.calibration.uncertainty    # per-player uncertainty buckets
+python -m scripts.calibration.availability   # games-played model
+python -m scripts.calibration.strategy       # whole drafts: value vs greedy vs rollout
+```
+
+`fetch` is the only one that touches the network; the rest read the cache in
+`scripts/calibration/data/` (gitignored). `strategy` reads the league's pool
+and valuations from the database. Each script fits on some seasons and reports
+on the held-out ones.
 
 ## Operational limits
 
