@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useRequireAuth } from "@/lib/auth";
+import { EmptyState, Loading, OpHeader, Panel, Readout, pad } from "@/components/Hud";
 import type { Board, League } from "@/lib/models";
 
 export default function LeaguesPage() {
-  const { ready, token } = useRequireAuth();
+  const { ready, token, user } = useRequireAuth();
   const [leagues, setLeagues] = useState<League[]>([]);
   const [boards, setBoards] = useState<Board[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -65,169 +66,233 @@ export default function LeaguesPage() {
     }
   }
 
-  if (!ready || !token) return <p className="muted">Loading…</p>;
+  if (!ready || !token) return <Loading />;
+
+  const leagueById = new Map(leagues.map((l) => [l.id, l]));
+  const shared = boards.filter((b) => user && b.user_id !== user.id).length;
 
   return (
     <>
+      <OpHeader
+        kicker={["Ops", "Command"]}
+        title="Command center"
+        sub="Connect an ESPN league, sync its player pool, compute values, then open a board to rank, tier and run mock drafts."
+      />
+
       {error && <p className="error">{error}</p>}
 
-      <div className="card">
-        <h2>Connect a league</h2>
-        <div className="body">
-          <div className="row">
-            <input value={espnId} onChange={(e) => setEspnId(e.target.value)} size={12} placeholder="espn league id" />
-            <input value={season} onChange={(e) => setSeason(e.target.value)} size={6} placeholder="season" />
-            <input value={name} onChange={(e) => setName(e.target.value)} size={16} placeholder="name" />
+      <div className="readouts">
+        <Readout label="Leagues" value={pad(leagues.length)} tone="amber" sub="connected to ESPN" />
+        <Readout
+          label="Boards"
+          value={pad(boards.length)}
+          sub={shared > 0 ? `${shared} shared with you` : "ranks · tiers · mocks"}
+        />
+        <Readout
+          label="Teams tracked"
+          value={leagues.reduce((n, l) => n + l.num_teams, 0)}
+          sub="across all leagues"
+        />
+        <Readout
+          label="Scored stats"
+          value={leagues[0] ? Object.keys(leagues[0].point_weights).length : "—"}
+          sub={leagues[0] ? `in ${leagues[0].name}` : "no league yet"}
+        />
+      </div>
+
+      <Panel
+        code="SEC-01"
+        title="Connect a league"
+        meta={<span>source: ESPN fantasy API</span>}
+        foot={
+          <p className="muted" style={{ margin: 0 }}>
+            This calls the real ESPN API. To try it without one, run{" "}
+            <code>python scripts/seed_demo.py --email you@example.com</code> and reload.
+          </p>
+        }
+      >
+        <div className="fields">
+          <div className="field">
+            <label htmlFor="espn-id">ESPN league id</label>
+            <input id="espn-id" value={espnId} onChange={(e) => setEspnId(e.target.value)} size={12} />
+          </div>
+          <div className="field">
+            <label htmlFor="season">Season</label>
+            <input id="season" value={season} onChange={(e) => setSeason(e.target.value)} size={6} />
+          </div>
+          <div className="field">
+            <label htmlFor="lname">Name</label>
+            <input id="lname" value={name} onChange={(e) => setName(e.target.value)} size={18} />
+          </div>
+          <div className="field" style={{ flex: 1, minWidth: 220 }}>
+            <label htmlFor="s2">espn_s2 · private leagues only</label>
             {/* type="password" because espn_s2 is a live session cookie, not
                 a setting: anyone who reads it over your shoulder or out of a
                 screen share is signed in as you at ESPN until it expires. The
-                API encrypts it at rest and never returns it (SPEC 2.3); this
-                is the same care at the only point where it is visible.
+                API encrypts it at rest and never returns it; this is the same
+                care at the only point where it is visible.
                 autoComplete="off" keeps it out of the browser's saved
                 form-fill, which is not an encrypted store. */}
             <input
+              id="s2"
               type="password"
               autoComplete="off"
               spellCheck={false}
               value={cookie}
               onChange={(e) => setCookie(e.target.value)}
-              size={22}
-              placeholder="espn_s2 (private leagues only)"
+              placeholder="leave blank for a public league"
             />
-            <button
-              className="primary"
-              disabled={busy !== null}
-              onClick={() =>
-                void run("create", () =>
-                  api<League>("POST", "/leagues", {
-                    token,
-                    body: {
-                      espn_league_id: Number(espnId),
-                      season: Number(season),
-                      name,
-                      // Omitted rather than sent empty: the API stores NULL for
-                      // a public league, not an encrypted empty string.
-                      ...(cookie.trim() ? { espn_s2: cookie.trim() } : {}),
-                    },
-                  }),
-                )
-              }
-            >
-              {busy === "create" ? "Contacting ESPN…" : "Connect"}
-            </button>
           </div>
-          <p className="muted">
-            This calls the real ESPN API. To try it without one, run{" "}
-            <code>python scripts/seed_demo.py --email you@example.com</code> and reload.
-          </p>
+          <button
+            className="primary big"
+            disabled={busy !== null}
+            onClick={() =>
+              void run("create", () =>
+                api<League>("POST", "/leagues", {
+                  token,
+                  body: {
+                    espn_league_id: Number(espnId),
+                    season: Number(season),
+                    name,
+                    // Omitted rather than sent empty: the API stores NULL for
+                    // a public league, not an encrypted empty string.
+                    ...(cookie.trim() ? { espn_s2: cookie.trim() } : {}),
+                  },
+                }),
+              )
+            }
+          >
+            {busy === "create" ? "Contacting ESPN…" : "Connect"}
+          </button>
         </div>
-      </div>
+      </Panel>
 
-      <div className="card">
-        <h2>Leagues</h2>
-        <div className="body">
-          {leagues.length === 0 ? (
-            <p className="muted">None yet.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th className="num">Teams</th>
-                  <th className="num">Roster</th>
-                  <th>Format</th>
-                  <th>Slots</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {leagues.map((l) => (
-                  <tr key={l.id}>
-                    <td>
-                      {l.name} <span className="muted">· {l.season}</span>
-                    </td>
-                    <td className="num">{l.num_teams}</td>
-                    <td className="num">{l.roster_size}</td>
-                    <td>{l.scoring_format}</td>
-                    <td className="muted">{Object.keys(l.roster_slots).join(" ")}</td>
-                    <td>
-                      <button
-                        disabled={busy !== null}
-                        onClick={() => void run("sync", () => api("POST", `/leagues/${l.id}/sync`, { token }))}
-                      >
-                        sync
-                      </button>{" "}
-                      <button
-                        disabled={busy !== null}
-                        onClick={() =>
-                          void run("compute", () =>
-                            api("POST", `/leagues/${l.id}/valuations/compute`, { token }),
-                          )
-                        }
-                      >
-                        compute values
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </div>
+      <Panel code="SEC-02" title="Leagues" meta={<span>{leagues.length} on file</span>}>
+        {leagues.length === 0 ? (
+          <EmptyState title="No leagues on file">Connect one above to pull its player pool.</EmptyState>
+        ) : (
+          <div className="dossiers">
+            {leagues.map((l) => (
+              <article key={l.id} className="dossier">
+                <span className="stamp">{l.scoring_format.toUpperCase()}</span>
+                <div className="dossier-id">
+                  ESPN {l.espn_league_id} · season {l.season}
+                </div>
+                <div className="dossier-title">{l.name}</div>
+                <div className="dossier-stats">
+                  <span>
+                    <b>{l.num_teams}</b>teams
+                  </span>
+                  <span>
+                    <b>{l.roster_size}</b>roster
+                  </span>
+                  <span>
+                    <b>{Object.keys(l.point_weights).length}</b>scored stats
+                  </span>
+                </div>
+                <div className="chips">
+                  {Object.entries(l.roster_slots).map(([slot, n]) => (
+                    <span key={slot} className="chip">
+                      {slot}
+                      <b>×{n}</b>
+                    </span>
+                  ))}
+                </div>
+                <div className="dossier-actions">
+                  <button
+                    className="sm"
+                    disabled={busy !== null}
+                    onClick={() => void run("sync", () => api("POST", `/leagues/${l.id}/sync`, { token }))}
+                  >
+                    {busy === "sync" ? "Syncing…" : "Sync pool"}
+                  </button>
+                  <button
+                    className="sm"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      void run("compute", () =>
+                        api("POST", `/leagues/${l.id}/valuations/compute`, { token }),
+                      )
+                    }
+                  >
+                    {busy === "compute" ? "Computing…" : "Compute values"}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </Panel>
 
-      <div className="card">
-        <h2>Boards</h2>
-        <div className="body">
-          <div className="row">
-            <select value={boardLeague} onChange={(e) => setBoardLeague(e.target.value)}>
+      <Panel code="SEC-03" title="Boards" meta={<span>{boards.length} active</span>} hot={boards.length > 0}>
+        <div className="fields" style={{ marginBottom: 16 }}>
+          <div className="field">
+            <label htmlFor="board-league">League</label>
+            <select id="board-league" value={boardLeague} onChange={(e) => setBoardLeague(e.target.value)}>
               {leagues.map((l) => (
                 <option key={l.id} value={l.id}>
                   {l.name} · {l.season}
                 </option>
               ))}
             </select>
-            <input value={boardName} onChange={(e) => setBoardName(e.target.value)} size={18} />
-            <button
-              className="primary"
-              disabled={busy !== null || !boardLeague}
-              onClick={() =>
-                void run("board", () =>
-                  api<Board>("POST", "/boards", { token, body: { league_id: boardLeague, name: boardName } }),
-                )
-              }
-            >
-              New board
-            </button>
           </div>
-          {boards.length === 0 ? (
-            <p className="muted">No boards yet.</p>
-          ) : (
-            <table>
-              <tbody>
-                {boards.map((b) => (
-                  <tr key={b.id}>
-                    <td>
-                      {/* Query string, not a [boardId] segment: a static export
-                          cannot prerender a route whose id is unknown at build. */}
-                      <a href={`/board?id=${b.id}`}>{b.name}</a>
-                    </td>
-                    <td className="num">
+          <div className="field">
+            <label htmlFor="board-name">Board name</label>
+            <input id="board-name" value={boardName} onChange={(e) => setBoardName(e.target.value)} size={20} />
+          </div>
+          <button
+            className="primary"
+            disabled={busy !== null || !boardLeague}
+            onClick={() =>
+              void run("board", () =>
+                api<Board>("POST", "/boards", { token, body: { league_id: boardLeague, name: boardName } }),
+              )
+            }
+          >
+            New board
+          </button>
+        </div>
+        {boards.length === 0 ? (
+          <EmptyState title="No boards yet">
+            A board is where ranks, tiers and mock drafts live.
+          </EmptyState>
+        ) : (
+          <div className="dossiers">
+            {boards.map((b, i) => {
+              const mine = !user || b.user_id === user.id;
+              const league = leagueById.get(b.league_id);
+              return (
+                <article key={b.id} className="dossier">
+                  <span className={mine ? "stamp hot" : "stamp cold"}>{mine ? "OWNED" : "SHARED"}</span>
+                  <div className="dossier-id">
+                    Board {pad(i + 1)} · opened {b.created_at.slice(0, 10)}
+                  </div>
+                  {/* Query string, not a [boardId] segment: a static export
+                      cannot prerender a route whose id is unknown at build. */}
+                  <a className="dossier-title" href={`/board?id=${b.id}`}>
+                    {b.name}
+                  </a>
+                  <div className="muted">{league ? `${league.name} · ${league.season}` : "shared league"}</div>
+                  <div className="dossier-actions">
+                    <a className="btn sm primary" href={`/board?id=${b.id}`}>
+                      Open board
+                    </a>
+                    {mine && (
                       <button
-                        className="danger"
+                        className="sm danger"
                         disabled={busy !== null}
                         onClick={() => void run("del", () => api("DELETE", `/boards/${b.id}`, { token }))}
                       >
-                        delete
+                        Delete
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </div>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
     </>
   );
 }
