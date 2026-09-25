@@ -5,8 +5,6 @@ data source (player pool, projections, league scoring settings); this app owns
 the persistent, authenticated data — custom rankings, tiers, notes, mock drafts
 and computed player values.
 
-Build spec: [`Draft_War_Room_SPEC.md`](Draft_War_Room_SPEC.md).
-
 ## Status
 
 | Area | State |
