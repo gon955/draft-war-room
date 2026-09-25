@@ -7,9 +7,9 @@ export function ConfidenceLegend() {
   return (
     <p className="muted legend">
       <b>Conf</b> is how many of a player&rsquo;s projected points rest on stats the engine
-      estimated rather than ones ESPN projects — rebound splits, double-doubles. Compare players
-      on this rather than on the full error bar: the rest of the uncertainty is common to the pool
-      and cancels.{" "}
+      estimated rather than ones ESPN projects — rebound splits, double-doubles. It leaves out how
+      settled a player&rsquo;s role is (projected minutes, games missed last season), which is
+      uncertainty too.{" "}
       <span className="conf conf-high">under 2% of projection</span>,{" "}
       <span className="conf conf-medium">2–5%</span>,{" "}
       <span className="conf conf-low">over 5%</span>,{" "}

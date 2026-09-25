@@ -31,7 +31,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from warroom.config import get_settings
 from warroom.models import League, Player, ScoringFormat, Valuation
+from warroom.valuation.availability import apply_availability
 from warroom.valuation.domain import LeagueSettings, PlayerProjection
 from warroom.valuation.engine import ReplacementBasis, value_over_replacement
 from warroom.valuation.stats import StatCoverage, pool_uncertainty, resolve_pool
@@ -119,7 +121,14 @@ def compute_valuations(db: Session, league: League) -> tuple[int, list[StatCover
     # defaults an unmatched stat to 0.0, so a league scoring oreb/dreb against
     # projections that only carry `reb` values rebounding at nothing at all —
     # silently, and wrongly, for every player.
-    projections, coverage = resolve_pool([to_projection(p) for p in pool], settings.point_weights)
+    projected = [to_projection(p) for p in pool]
+    # Before anything else sees the line, so replacement levels are computed
+    # on the same adjusted numbers as the players measured against them —
+    # adjusting afterwards would compare adjusted players with an unadjusted
+    # baseline, which is worse than not adjusting at all.
+    if get_settings().availability_model:
+        projected = [apply_availability(p) for p in projected]
+    projections, coverage = resolve_pool(projected, settings.point_weights)
     # The band comes from the SAME coverage report the engine was fed, so a
     # value and its uncertainty can never describe different runs.
     bands = pool_uncertainty(projections, settings.point_weights, coverage)

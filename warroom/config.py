@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     # whether they will still be there next turn.
     draft_market_weight: float = 1.0
 
+    # Scale each player's projected totals to the share of games players like
+    # them have actually played (valuation/availability.py), before values are
+    # computed. OFF: it fixes the level of every projection — they run 20-25%
+    # high — but on seasons held out from its fit it did not rank players
+    # better than a flat haircut would, and a flat haircut changes no pick.
+    # Takes effect on the next POST /valuations/compute.
+    availability_model: bool = False
+
     # /docs, /redoc and /openapi.json. On by default so local development and
     # the CI type-generation step keep working; turn OFF in production unless
     # the API surface is meant to be public.

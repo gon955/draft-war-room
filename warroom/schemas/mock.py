@@ -111,6 +111,19 @@ class LiveValueOut(BaseModel):
     value_change: float
 
 
+class RolloutOut(BaseModel):
+    """What taking this player leads to, played forward to your next pick.
+
+    Only on the candidates `depth=rollout` re-scored. `value` is your starting
+    lineup's value after this pick and your best response next turn, in the
+    same units as live.value; `next_player` is that response — the player the
+    rollout expects you to take with the next pick if you take this one now.
+    """
+
+    value: float
+    next_player: PlayerOut | None
+
+
 class RecommendationOut(BestAvailableOut):
     """A best-available row plus its live, draft-aware re-valuation.
 
@@ -145,6 +158,8 @@ class RecommendationOut(BestAvailableOut):
     # together. The default sort, because a draft pick is a choice about
     # timing, not just about players.
     score: float
+    # depth=rollout only, and only for the candidates it played forward.
+    rollout: RolloutOut | None = None
 
 
 class SeatOut(BaseModel):
@@ -231,6 +246,21 @@ class SimulateOut(BaseModel):
     board_complete: bool
 
 
+class RecommendationDepth(str, Enum):
+    """How far the recommendation looks ahead.
+
+    GREEDY prices each candidate against your roster as it stands; fast, and
+    the default. ROLLOUT also plays the top candidates forward — the field
+    drafts to your next turn on ESPN's numbers and you take your best
+    response — and ranks them by the lineup the two picks leave. It sees
+    what greedy cannot, that taking a big now makes next turn's big a bench
+    piece, at the cost of a few hundred milliseconds.
+    """
+
+    GREEDY = "greedy"
+    ROLLOUT = "rollout"
+
+
 class RecommendationSort(str, Enum):
     """How to order the recommendation.
 
@@ -246,13 +276,15 @@ class RecommendationSort(str, Enum):
     SCORE = "score"
     MARGINAL = "marginal"
     VALUE = "value"
-    # score minus one standard deviation of the MODEL component of the
-    # band. Ranks by what you would get in a poor outcome for the parts of
-    # the projection this app inferred rather than measured, so a player
-    # whose score leans on estimated stats has to be clearly ahead, not
-    # marginally ahead, to outrank one whose score is measured.
+    # score minus half a standard deviation of the part of the band that
+    # distinguishes players (stats.comparative_sd): the model component,
+    # for stats this app inferred rather than measured, plus how much less
+    # settled this player's projection is than a heavy-minutes starter's —
+    # few projected minutes, or a short previous season. Ranks by what you
+    # would get in a poor outcome, so a player carrying either kind of doubt
+    # has to be clearly ahead, not marginally ahead, to outrank one who
+    # carries neither.
     #
-    # Only the model component, deliberately. The baseline band is common
-    # to the whole pool, so subtracting it would shift every candidate by
-    # roughly the same amount and change nothing but the axis.
+    # Not the whole band. The floor every player shares cancels in any
+    # comparison, so subtracting it would change nothing but the axis.
     CONFIDENT = "confident"

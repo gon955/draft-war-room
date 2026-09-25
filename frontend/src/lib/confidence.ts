@@ -6,8 +6,13 @@
 //   model_sd  the part of that band contributed by THIS app's estimators
 //             rather than by ESPN's projections
 //
-// model_sd is the one worth showing. value_sd is largely common to the pool and
-// cancels when you compare two players; model_sd does not, because it comes from
+// model_sd is the one this column shows. It is not the only uncertainty that
+// survives a comparison — a player on few projected minutes, or coming off a
+// short season, is less settled than a heavy-minutes starter, and value_sd is
+// wider for them — but it is the one that is this app's own doing, which is
+// what "Conf" claims to measure. The API's `sort=confident` recommendation
+// order accounts for both (warroom/valuation/stats.py, comparative_sd); no
+// screen requests it yet. model_sd comes from
 // stats ESPN never projects and the engine has to model. In a league scoring
 // oreb/dreb/dd/td that is a sixth of all scoring, and it lands very unevenly:
 // two players on the same value are not equally knowable, because a rebounding
@@ -79,8 +84,8 @@ export function confidenceTitle(projectedPoints: number, modelSd: number): strin
 
   return (
     `${band}\n\nThat is ${(share * 100).toFixed(1)}% of their ${projectedPoints.toFixed(0)} ` +
-    `projected points. Compare players on this rather than on the full error bar — the rest ` +
-    `of the uncertainty is common to the pool and cancels.`
+    `projected points. It is not the whole story: how settled a player's role is — projected ` +
+    `minutes, games missed last season — is uncertainty too, and this number leaves it out.`
   );
 }
 

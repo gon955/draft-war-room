@@ -49,9 +49,11 @@ from warroom.schemas.mock import (
     PickOut,
     PickSet,
     PickWithPlayerOut,
+    RecommendationDepth,
     RecommendationOut,
     RecommendationPage,
     RecommendationSort,
+    RolloutOut,
     SeatOut,
     SimulateIn,
     SimulateOut,
@@ -62,10 +64,20 @@ from warroom.services.lineup import my_lineup
 from warroom.services.recommendation import NotValuedYet, recommend
 from warroom.services.simulation import NoEspnProjections, simulate
 from warroom.services.valuation import NotAPointsLeague
+from warroom.valuation.stats import comparative_sd
 
 router = APIRouter(tags=["mocks"])
 
 LimitParam = Annotated[int, Query(ge=1, le=200)]
+
+# How many bands of doubt the confident sort charges. A full band ranks by
+# roughly the 16th-percentile outcome, which on the real board pushed rotation
+# bigs 120-140 places down — Zach Edey from 50th to 188th — for a band that is
+# ~73% of their projection. That is a stance no manager in a season-total
+# league should take: finishing first of ten rewards variance, not avoiding
+# it. Half a band (~31st percentile) still makes doubt cost something visible
+# without letting it swamp the value it is discounting.
+CONFIDENT_BANDS = 0.5
 OffsetParam = Annotated[int, Query(ge=0)]
 
 
@@ -354,6 +366,7 @@ def recommendation(
     user: CurrentUser,
     position: Position | None = None,
     sort: RecommendationSort = RecommendationSort.SCORE,
+    depth: RecommendationDepth = RecommendationDepth.GREEDY,
     limit: LimitParam = 25,
     offset: OffsetParam = 0,
 ) -> RecommendationPage:
@@ -371,7 +384,7 @@ def recommendation(
     mock = _mock_for(db, mock_id, user, require_board_access)
 
     try:
-        results, waiting = recommend(db, mock)
+        results, waiting = recommend(db, mock, rollout=depth is RecommendationDepth.ROLLOUT)
     except NotAPointsLeague as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -431,13 +444,29 @@ def recommendation(
             r.player.espn_player_id,
         ),
     }
-    # Same fallback chain as SCORE below it. A league that estimates nothing
-    # has model_sd 0 for everybody, so the primary key ties for the whole
-    # board and the tie-break IS the ordering.
+    # Same fallback chain as SCORE below it. A pool of heavy-minutes starters
+    # on measured stats has comparative_sd 0 for everybody, so the primary key
+    # ties for the whole board and the tie-break IS the ordering.
+    # Bound now, not looked up when sorting: rollout mode below replaces the
+    # SCORE key, and the confident sort must keep greedy's tie-break.
+    greedy_score = sort_keys[RecommendationSort.SCORE]
     sort_keys[RecommendationSort.CONFIDENT] = lambda r: (
-        -(r.score - r.valuation.model_sd),
-        *sort_keys[RecommendationSort.SCORE](r),
+        -(
+            r.score
+            - CONFIDENT_BANDS * comparative_sd(r.valuation.value_sd, r.valuation.projected_points)
+        ),
+        *greedy_score(r),
     )
+    # In rollout mode the candidates it played forward lead the default order,
+    # ranked by the two-pick lineup they lead to, and everyone else follows in
+    # greedy order. Only SCORE changes: the other sorts are asking a different
+    # question on purpose, and rollout fields ride along on them unchanged.
+    if depth is RecommendationDepth.ROLLOUT:
+        sort_keys[RecommendationSort.SCORE] = lambda r: (
+            r.rollout_value is None,
+            -(r.rollout_value or 0.0),
+            *greedy_score(r),
+        )
     if sort in sort_keys:
         results = sorted(results, key=sort_keys[sort])
 
@@ -457,6 +486,18 @@ def recommendation(
                 survival=r.survival,
                 expected_next=r.expected_next,
                 score=r.score,
+                rollout=(
+                    RolloutOut(
+                        value=r.rollout_value,
+                        next_player=(
+                            PlayerOut.model_validate(r.rollout_next)
+                            if r.rollout_next is not None
+                            else None
+                        ),
+                    )
+                    if r.rollout_value is not None
+                    else None
+                ),
                 live=LiveValueOut(
                     value=r.live.value.value,
                     replacement_points=r.live.value.replacement_points,

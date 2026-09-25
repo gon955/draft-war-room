@@ -79,9 +79,10 @@ class ValuationOut(BaseModel):
     value: float
     assigned_slot: str
     # One standard deviation on `value`, in points, and the share of it
-    # coming from this app's own estimators rather than ESPN. Read the
-    # second one when comparing two players: the first is largely common
-    # to the whole pool and cancels, the second does not.
+    # coming from this app's own estimators rather than ESPN. value_sd is
+    # per player — wider for few projected minutes or a short previous
+    # season — but a floor of it is common to the whole pool and cancels;
+    # stats.comparative_sd is the part that does not.
     value_sd: float
     model_sd: float
     computed_at: datetime

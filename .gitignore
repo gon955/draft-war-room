@@ -31,3 +31,7 @@ roster_check.py
 # the repo. Both stay on disk.
 Draft_War_Room_SPEC.md
 HANDOFF.md
+
+# Calibration cache: pulled from ESPN by scripts/calibration/fetch.py and
+# rebuilt on demand, so it is data rather than source.
+scripts/calibration/data/

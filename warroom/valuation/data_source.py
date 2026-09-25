@@ -358,10 +358,14 @@ def espn_applied_total(player_stats: dict[str, Any], season: int) -> float | Non
     with THIS league's settings, by ESPN. It sits in the same dict as the raw
     totals projected_stats_of reads and was previously thrown away.
 
-    Worth keeping because it is an independent opinion rather than a different
-    route to ours. ESPN projects every stat it scores — including oreb/dreb and
-    double-doubles, which it does not publish and stats.py therefore has to
-    model — so this number is the one place their estimate of those is visible.
+    NOT an independent opinion, though it was long taken for one. It is
+    exactly the projected line above scored with this league's weights, with
+    each stat ESPN does not project (oreb, dreb, dd, td) counted as zero —
+    checked to 0.1% for every projected player 2024-2026, see
+    scripts/calibration/baseline.py. In a league scoring those, it runs well
+    below the line's real worth, most of all for bigs. Worth keeping anyway:
+    it is the number ESPN shows the room, so it is the right input for
+    predicting what the room will do, and the wrong one for valuing a player.
     """
     split = player_stats.get(f"{season}_projected", {})
     total = split.get("applied_total")
