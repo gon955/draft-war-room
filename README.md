@@ -5,38 +5,26 @@ data source (player pool, projections, league scoring settings); this app owns
 the persistent, authenticated data — custom rankings, tiers, notes, mock drafts
 and computed player values.
 
-## What it does
+## Status
 
-- **Leagues.** Connect an ESPN league, public or private (private-league
-  cookies are encrypted at rest), and sync its player pool, projections,
-  scoring weights and roster slots.
-- **Valuation.** Value over replacement under the league's own scoring, with
-  stats ESPN does not project (rebound splits, double- and triple-doubles)
-  estimated rather than scored as zero, and an uncertainty band on every value.
-- **Boards.** Custom rankings, notes and tiers (hand-built or auto-tiered from
-  values), shareable with other users.
-- **Mock drafts.** Record picks, see best-available, simulate bots that draft
-  on this app's values or on ESPN's, and ask for a recommendation that
-  accounts for your roster, the live replacement level and who will still be
-  there at your next pick.
-- **Frontend.** Four screens — login, leagues, board, mock draft — as a
-  Next.js 16 static export.
+| Area | State |
+|------|-------|
+| Valuation engine (VOR) | shipped, unit-tested |
+| ESPN adapter | shipped, contract-tested without the network |
+| Schema + migrations | all 10 tables, Alembic, no model drift |
+| Auth (register / login / JWT) | done |
+| Ownership + share authorization | done, full SPEC 6 matrix tested |
+| Leagues, boards, rankings, shares | done |
+| Tiers | done |
+| Players, valuations, auto-tiering | done |
+| Mock drafts + best-available | done — SPEC §4 complete |
+| Draft-aware recommendation | live replacement level shipped; roster fit and survival next |
+| Frontend | all four SPEC §8 screens built — Next.js 16 static export |
 
-## API
-
-| Group | Endpoints |
-|---|---|
-| auth | `POST /auth/register`, `POST /auth/login`, `GET /auth/me` |
-| leagues | `POST`/`GET /leagues`, `GET`/`DELETE /leagues/{id}`, `POST /leagues/{id}/sync` |
-| players | `GET /leagues/{id}/players`, `POST /leagues/{id}/valuations/compute`, `GET /leagues/{id}/valuations` |
-| boards | `POST`/`GET /boards`, `GET`/`PATCH`/`DELETE /boards/{id}` |
-| rankings | `GET`/`POST /boards/{id}/rankings`, `PATCH /boards/{id}/rankings/reorder`, `PATCH`/`DELETE /rankings/{id}` |
-| tiers | `GET`/`POST /boards/{id}/tiers`, `POST /boards/{id}/tiers/auto`, `PATCH`/`DELETE /tiers/{id}` |
-| shares | `GET`/`POST /boards/{id}/shares`, `DELETE /shares/{id}` |
-| mocks | `POST`/`GET /boards/{id}/mocks`, `POST`/`GET /mocks/{id}/picks`, `GET /mocks/{id}/best-available`, `GET /mocks/{id}/recommendation`, `GET /mocks/{id}/lineup`, `POST /mocks/{id}/simulate` |
-| meta | `GET /health`, `GET /ready` |
-
-With `DOCS_ENABLED` on, `/docs` has every route and schema.
+The API is 35 endpoints: all 32 in SPEC §4, plus three additions the spec
+implies but does not enumerate — `POST /boards/{id}/tiers/auto` (auto-tiering,
+SPEC §5.4), `GET /mocks/{id}/picks` (§4 records picks but never reads the board
+back) and `GET /mocks/{id}/recommendation` (below).
 
 ## Layout
 
